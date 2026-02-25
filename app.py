@@ -59,25 +59,39 @@ COLORS = {
 
 # --- PERSISTENCE FUNCTIONS ---
 def load_data(key, default_data=None):
+    # 'key' isn't strictly needed for JSONBin since one bin holds everything, 
+    # but we keep it to maintain compatibility with the rest of your app's logic.
     if key not in st.session_state:
-        filename = FILES.get(key)
-        if filename and os.path.exists(filename):
-            try:
-                with open(filename, 'r') as f:
-                    st.session_state[key] = json.load(f)
-            except:
+        try:
+            url = f"https://api.jsonbin.io/v3/b/{st.secrets['JSONBIN_BIN_ID']}/latest"
+            headers = {
+                "X-Master-Key": st.secrets['JSONBIN_KEY']
+            }
+            response = requests.get(url, headers=headers)
+            
+            if response.status_code == 200:
+                # JSONBin wraps your data inside a "record" object
+                st.session_state[key] = response.json()['record']
+            else:
                 st.session_state[key] = default_data if default_data is not None else {}
-        else:
+        except Exception as e:
+            st.error(f"Failed to load cloud data: {e}")
             st.session_state[key] = default_data if default_data is not None else {}
+            
     return st.session_state[key]
 
 def save_data(key, data):
     st.session_state[key] = data
     try:
-        with open(FILES[key], 'w') as f:
-            json.dump(data, f)
-    except:
-        pass 
+        url = f"https://api.jsonbin.io/v3/b/{st.secrets['JSONBIN_BIN_ID']}"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Master-Key": st.secrets['JSONBIN_KEY']
+        }
+        # Use PUT to overwrite the bin with the newly updated dictionary
+        requests.put(url, json=data, headers=headers)
+    except Exception as e:
+        st.error(f"Failed to save to cloud: {e}") 
 
 # --- HELPER FUNCTIONS ---
 def format_days_until(target_date):

@@ -59,20 +59,20 @@ COLORS = {
 
 # --- PERSISTENCE FUNCTIONS ---
 def load_data(key, default_data=None):
-    # 'key' isn't strictly needed for JSONBin since one bin holds everything, 
-    # but we keep it to maintain compatibility with the rest of your app's logic.
     if key not in st.session_state:
         try:
             url = f"https://api.jsonbin.io/v3/b/{st.secrets['JSONBIN_BIN_ID']}/latest"
             headers = {
-                "X-Master-Key": st.secrets['JSONBIN_KEY']
+                # Changed from X-Master-Key to X-Access-Key for custom permission keys
+                "X-Access-Key": st.secrets['JSONBIN_KEY']
             }
             response = requests.get(url, headers=headers)
             
             if response.status_code == 200:
-                # JSONBin wraps your data inside a "record" object
                 st.session_state[key] = response.json()['record']
             else:
+                # Explicit error if the database connection fails
+                st.error(f"Database Read Error ({response.status_code}): {response.text}")
                 st.session_state[key] = default_data if default_data is not None else {}
         except Exception as e:
             st.error(f"Failed to load cloud data: {e}")
@@ -86,10 +86,13 @@ def save_data(key, data):
         url = f"https://api.jsonbin.io/v3/b/{st.secrets['JSONBIN_BIN_ID']}"
         headers = {
             "Content-Type": "application/json",
-            "X-Master-Key": st.secrets['JSONBIN_KEY']
+            "X-Access-Key": st.secrets['JSONBIN_KEY'] # Changed to X-Access-Key
         }
-        # Use PUT to overwrite the bin with the newly updated dictionary
-        requests.put(url, json=data, headers=headers)
+        response = requests.put(url, json=data, headers=headers)
+        
+        # Explicit error if the save action fails
+        if response.status_code != 200:
+            st.error(f"Database Write Error ({response.status_code}): {response.text}")
     except Exception as e:
         st.error(f"Failed to save to cloud: {e}") 
 

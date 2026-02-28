@@ -63,7 +63,6 @@ def load_data(key, default_data=None):
         try:
             url = f"https://api.jsonbin.io/v3/b/{st.secrets['JSONBIN_BIN_ID']}/latest"
             headers = {
-                # Changed from X-Master-Key to X-Access-Key for custom permission keys
                 "X-Access-Key": st.secrets['JSONBIN_KEY']
             }
             response = requests.get(url, headers=headers)
@@ -71,7 +70,6 @@ def load_data(key, default_data=None):
             if response.status_code == 200:
                 st.session_state[key] = response.json()['record']
             else:
-                # Explicit error if the database connection fails
                 st.error(f"Database Read Error ({response.status_code}): {response.text}")
                 st.session_state[key] = default_data if default_data is not None else {}
         except Exception as e:
@@ -86,11 +84,10 @@ def save_data(key, data):
         url = f"https://api.jsonbin.io/v3/b/{st.secrets['JSONBIN_BIN_ID']}"
         headers = {
             "Content-Type": "application/json",
-            "X-Access-Key": st.secrets['JSONBIN_KEY'] # Changed to X-Access-Key
+            "X-Access-Key": st.secrets['JSONBIN_KEY']
         }
         response = requests.put(url, json=data, headers=headers)
         
-        # Explicit error if the save action fails
         if response.status_code != 200:
             st.error(f"Database Write Error ({response.status_code}): {response.text}")
     except Exception as e:
@@ -126,6 +123,34 @@ def get_stock_metadata(ticker_symbol):
                 earn_days = format_days_until(earn_dates[0])
     except: pass
     return div_days, earn_days
+
+@st.cache_data(ttl=3600)
+def get_put_call_ratio(ticker_symbol):
+    """
+    Fetches open interest for the nearest 4 expiration dates to calculate the Put/Call Ratio.
+    Limited to 4 dates to ensure the app doesn't time out during loading.
+    """
+    try:
+        stock = yf.Ticker(ticker_symbol)
+        expirations = stock.options
+        if not expirations:
+            return None
+        
+        total_puts = 0
+        total_calls = 0
+        
+        # Loop through up to the 4 nearest expirations
+        for date in expirations[:4]:
+            opt = stock.option_chain(date)
+            total_puts += opt.puts['openInterest'].fillna(0).sum()
+            total_calls += opt.calls['openInterest'].fillna(0).sum()
+            
+        if total_calls == 0:
+            return None
+            
+        return round(total_puts / total_calls, 2)
+    except:
+        return None
 
 @st.cache_data(ttl=300)
 def get_market_data(tickers):
@@ -164,12 +189,14 @@ def get_market_data(tickers):
             vol_percentile = min(99.0, vol_percentile)
 
             div_days, earn_days = get_stock_metadata(ticker)
+            pc_ratio = get_put_call_ratio(ticker)
 
             data.append({
                 "Ticker": ticker,
                 "Price": current_price,
                 "% Change": change_pct,
                 "Vol %ile (365d)": vol_percentile,
+                "Put/Call Ratio": pc_ratio,
                 "Next Earn": earn_days,
                 "Next Div": div_days
             })
@@ -258,24 +285,21 @@ if not user_list:
     st.warning("No users found. Please create a user profile in the sidebar.")
     current_user = None
 else:
-    # Ensure session state has a valid current user
     if 'current_user' not in st.session_state or st.session_state.current_user not in user_list:
         st.session_state.current_user = user_list[0]
     
-    # Selecting a new user triggers an automatic rerun from top to bottom
     current_user = st.selectbox(
         "Select User Profile", 
         user_list, 
         index=user_list.index(st.session_state.current_user)
     )
-    # Update session state if changed
     if current_user != st.session_state.current_user:
         st.session_state.current_user = current_user
         st.rerun()
 
 st.markdown("---")
 
-# --- SIDEBAR LOGIC (Placed here so it has access to the current_user) ---
+# --- SIDEBAR LOGIC ---
 st.sidebar.subheader("Users")
 with st.sidebar.form("add_user_form", clear_on_submit=True):
     new_user = st.text_input("Name").strip()
@@ -286,7 +310,7 @@ with st.sidebar.form("add_user_form", clear_on_submit=True):
         elif new_user in users_data:
             st.sidebar.error("User already exists.")
         else:
-            users_data[new_user] = [] # Default initial portfolio
+            users_data[new_user] = [] 
             save_data('users', users_data)
             st.session_state.current_user = new_user
             st.rerun()
@@ -297,14 +321,12 @@ if users_data:
         if st.sidebar.button(f"Delete {to_remove_user}"):
             del users_data[to_remove_user]
             save_data('users', users_data)
-            # Reset current user if we just deleted them
             if st.session_state.current_user == to_remove_user:
                 st.session_state.current_user = list(users_data.keys())[0] if users_data else None
             st.rerun()
 
 st.sidebar.markdown("---")
 
-# Sidebar Portfolio Management for Current User
 if current_user:
     current_stocks = users_data[current_user]
     st.sidebar.subheader(f"{current_user}'s Portfolio")
@@ -329,7 +351,7 @@ if current_user:
                 save_data('users', users_data)
                 st.rerun()
 
-# 3. INDICES & FEAR/GREED (Global)
+# 3. INDICES & FEAR/GREED
 if 'carousel_idx' not in st.session_state:
     st.session_state.carousel_idx = 0
 
@@ -372,7 +394,7 @@ for i in range(3):
 
 st.markdown("---")
 
-# 4. PORTFOLIO TABLE & CHARTS (User Specific)
+# 4. PORTFOLIO TABLE & CHARTS
 if current_user:
     st.subheader(f"{current_user}'s Portfolio")
     my_stocks_list = users_data[current_user]
@@ -384,20 +406,33 @@ if current_user:
             stock_df = get_market_data(my_stocks_list)
 
         if not stock_df.empty:
+            # Color formatter for price change %
             def highlight_change(val):
                 if isinstance(val, (int, float)):
                     color = COLORS['good_bg'] if val > 0 else COLORS['bad_bg'] if val < 0 else ''
                     return f'background-color: {color}; color: black'
                 return ''
 
+            # Color formatter for Put/Call Ratio (bullish < 1, bearish > 1)
+            def highlight_pc(val):
+                if isinstance(val, (int, float)):
+                    if val < 1.0:
+                        return f'background-color: {COLORS["good_bg"]}; color: black'
+                    elif val > 1.0:
+                        return f'background-color: {COLORS["bad_bg"]}; color: black'
+                return ''
+
             st.dataframe(
-                stock_df.style.map(highlight_change, subset=['% Change'])
+                stock_df.style
+                .map(highlight_change, subset=['% Change'])
+                .map(highlight_pc, subset=['Put/Call Ratio'])
                 .format({
                     "Price": "${:,.2f}", 
                     "% Change": "{:+.2f}%",
-                    "Vol %ile (365d)": "{:.0f}%"
+                    "Vol %ile (365d)": "{:.0f}%",
+                    "Put/Call Ratio": "{:.2f}"
                 }),
-                column_order=("Ticker", "Price", "% Change", "Vol %ile (365d)", "Next Earn", "Next Div"),
+                column_order=("Ticker", "Price", "% Change", "Vol %ile (365d)", "Put/Call Ratio", "Next Earn", "Next Div"),
                 hide_index=True,
                 use_container_width=True
             )
@@ -460,7 +495,7 @@ if current_user:
                 with tab90: plot_chart(90)
                 with tab365: plot_chart(365)
 
-# --- EVENTS LOGIC (Global) ---
+# --- EVENTS LOGIC ---
 st.markdown("---")
 st.subheader("Events")
 

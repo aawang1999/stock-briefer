@@ -415,7 +415,7 @@ if current_user:
 
             # Color formatter for Put/Call Ratio (bullish < 1, bearish > 1)
             def highlight_pc(val):
-                if isinstance(val, (int, float)):
+                if pd.notnull(val) and isinstance(val, (int, float)):
                     if val < 1.0:
                         return f'background-color: {COLORS["good_bg"]}; color: black'
                     elif val > 1.0:
@@ -426,15 +426,18 @@ if current_user:
                 stock_df.style
                 .map(highlight_change, subset=['% Change'])
                 .map(highlight_pc, subset=['Put/Call Ratio'])
-                .format({
-                    "Price": "${:,.2f}", 
-                    "% Change": "{:+.2f}%",
-                    "Vol %ile (365d)": "{:.0f}%",
-                    "Put/Call Ratio": "{:.2f}"
-                }),
+                .format(
+                    formatter={
+                        "Price": "${:,.2f}", 
+                        "% Change": "{:+.2f}%",
+                        "Vol %ile (365d)": "{:.0f}%",
+                        "Put/Call Ratio": "{:.2f}"
+                    },
+                    na_rep="N/A" # This handles None data safely without crashing
+                ),
                 column_order=("Ticker", "Price", "% Change", "Vol %ile (365d)", "Put/Call Ratio", "Next Earn", "Next Div"),
                 hide_index=True,
-                use_container_width=True
+                width='stretch' # Fixes the Streamlit deprecation warning
             )
 
             st.markdown("---")
@@ -550,7 +553,7 @@ with st.spinner("Fetching upcoming calendar events..."):
                         "Name": st.column_config.TextColumn("Event Name", width="large")
                     },
                     hide_index=True,
-                    use_container_width=True
+                    width='stretch' # Fixes the Streamlit deprecation warning
                 )
             else:
                 st.info(f"No high/medium impact events found for {', '.join(selected_currencies)} in the next 7 days.")

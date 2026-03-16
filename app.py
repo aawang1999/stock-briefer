@@ -4,9 +4,9 @@ import requests
 import yfinance as yf
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
+import plotly.express as px
 from plotly.subplots import make_subplots
 import os
-import json
 import glob
 
 # --- CONFIGURATION & CONSTANTS ---
@@ -42,7 +42,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Update file to store users and their portfolios instead of just one list of stocks
 FILES = {'users': 'users.json'}
 INDICES = {'^DJI': 'Dow Jones', '^GSPC': 'S&P 500', '^IXIC': 'NASDAQ'}
 
@@ -62,9 +61,7 @@ def load_data(key, default_data=None):
     if key not in st.session_state:
         try:
             url = f"https://api.jsonbin.io/v3/b/{st.secrets['JSONBIN_BIN_ID']}/latest"
-            headers = {
-                "X-Access-Key": st.secrets['JSONBIN_KEY']
-            }
+            headers = {"X-Access-Key": st.secrets['JSONBIN_KEY']}
             response = requests.get(url, headers=headers)
             
             if response.status_code == 200:
@@ -126,28 +123,18 @@ def get_stock_metadata(ticker_symbol):
 
 @st.cache_data(ttl=3600)
 def get_put_call_ratio(ticker_symbol):
-    """
-    Fetches open interest for the nearest 4 expiration dates to calculate the Put/Call Ratio.
-    Limited to 4 dates to ensure the app doesn't time out during loading.
-    """
     try:
         stock = yf.Ticker(ticker_symbol)
         expirations = stock.options
-        if not expirations:
-            return None
+        if not expirations: return None
         
-        total_puts = 0
-        total_calls = 0
-        
-        # Loop through up to the 4 nearest expirations
+        total_puts, total_calls = 0, 0
         for date in expirations[:4]:
             opt = stock.option_chain(date)
             total_puts += opt.puts['openInterest'].fillna(0).sum()
             total_calls += opt.calls['openInterest'].fillna(0).sum()
             
-        if total_calls == 0:
-            return None
-            
+        if total_calls == 0: return None
         return round(total_puts / total_calls, 2)
     except:
         return None
@@ -236,7 +223,6 @@ def get_historical_prices(ticker, days):
 @st.cache_data(ttl=43200)
 def get_economic_events():
     from ecocal import Calendar
-    
     start_date = datetime.now()
     end_date = start_date + timedelta(days=7)
     
@@ -245,11 +231,7 @@ def get_economic_events():
     
     before_files = set(glob.glob("*.csv"))
     
-    ec = Calendar(startHorizon=start_str,
-                  endHorizon=end_str,
-                  withDetails=True,
-                  nbThreads=20,
-                  preBuildCalendar=True)
+    ec = Calendar(startHorizon=start_str, endHorizon=end_str, withDetails=True, nbThreads=20, preBuildCalendar=True)
     ec.saveCalendar()
     
     after_files = set(glob.glob("*.csv"))
@@ -270,9 +252,7 @@ def get_economic_events():
     return df
 
 # --- MAIN DASHBOARD ---
-
-# Load user profiles globally first
-default_users = {"Default User": []}
+default_users = {"Default User": {"categories": ["Uncategorized"], "stocks": {}}}
 users_data = load_data('users', default_users)
 user_list = list(users_data.keys())
 
@@ -288,11 +268,7 @@ else:
     if 'current_user' not in st.session_state or st.session_state.current_user not in user_list:
         st.session_state.current_user = user_list[0]
     
-    current_user = st.selectbox(
-        "Select User Profile", 
-        user_list, 
-        index=user_list.index(st.session_state.current_user)
-    )
+    current_user = st.selectbox("Select User Profile", user_list, index=user_list.index(st.session_state.current_user))
     if current_user != st.session_state.current_user:
         st.session_state.current_user = current_user
         st.rerun()
@@ -310,7 +286,7 @@ with st.sidebar.form("add_user_form", clear_on_submit=True):
         elif new_user in users_data:
             st.sidebar.error("User already exists.")
         else:
-            users_data[new_user] = [] 
+            users_data[new_user] = {"categories": ["Uncategorized"], "stocks": {}}
             save_data('users', users_data)
             st.session_state.current_user = new_user
             st.rerun()
@@ -327,33 +303,72 @@ if users_data:
 
 st.sidebar.markdown("---")
 
+# --- PORTFOLIO SIDEBAR UPDATES ---
 if current_user:
-    current_stocks = users_data[current_user]
+    user_data = users_data[current_user]
+    
+    # MIGRATION: Auto-convert old user list formats to new dictionary format
+    if isinstance(user_data, list):
+        user_data = {"categories": ["Uncategorized"], "stocks": {t: {"category": "Uncategorized", "shares": 0.0} for t in user_data}}
+        users_data[current_user] = user_data
+        save_data('users', users_data)
+        
+    current_categories = user_data.get("categories", ["Uncategorized"])
+    current_stocks = user_data.get("stocks", {})
+    
     st.sidebar.subheader(f"{current_user}'s Portfolio")
     
-    with st.sidebar.form("add_stock_form", clear_on_submit=True):
-        new_stock = st.text_input("Ticker").upper()
-        submitted_stock = st.form_submit_button("Add Stock")
-        if submitted_stock and new_stock:
-            if new_stock not in current_stocks:
-                current_stocks.append(new_stock)
-                current_stocks.sort()
-                users_data[current_user] = current_stocks
+    # CATEGORY MANAGEMENT
+    with st.sidebar.expander("Manage Categories"):
+        with st.form("add_cat_form", clear_on_submit=True):
+            new_cat = st.text_input("New Category Name").strip()
+            if st.form_submit_button("Add Category") and new_cat:
+                if new_cat not in current_categories:
+                    current_categories.append(new_cat)
+                    users_data[current_user]["categories"] = current_categories
+                    save_data('users', users_data)
+                    st.rerun()
+                    
+        if len(current_categories) > 0:
+            rem_cat = st.selectbox("Remove Category", ["Select..."] + current_categories)
+            if rem_cat != "Select..." and st.button(f"Delete '{rem_cat}'"):
+                current_categories.remove(rem_cat)
+                if not current_categories:
+                    current_categories.append("Uncategorized")
+                default_cat = current_categories[0]
+                
+                # Reassign stocks from deleted category to default category
+                for s, d in current_stocks.items():
+                    if d["category"] == rem_cat:
+                        d["category"] = default_cat
+                users_data[current_user]["categories"] = current_categories
+                users_data[current_user]["stocks"] = current_stocks
                 save_data('users', users_data)
                 st.rerun()
 
-    if current_stocks:
-        to_remove_stock = st.sidebar.selectbox("Remove Stock", ["Select..."] + current_stocks)
-        if to_remove_stock != "Select...":
-            if st.sidebar.button(f"Drop {to_remove_stock}"):
-                current_stocks.remove(to_remove_stock)
-                users_data[current_user] = current_stocks
+    # STOCK MANAGEMENT
+    with st.sidebar.expander("Manage Stocks", expanded=True):
+        with st.form("add_stock_form", clear_on_submit=True):
+            new_stock = st.text_input("Ticker").upper().strip()
+            sel_cat = st.selectbox("Category", current_categories)
+            shares_val = st.number_input("Shares Owned", min_value=0.0, step=1.0, value=0.0)
+            
+            if st.form_submit_button("Add / Update Stock") and new_stock:
+                current_stocks[new_stock] = {"category": sel_cat, "shares": shares_val}
+                users_data[current_user]["stocks"] = current_stocks
+                save_data('users', users_data)
+                st.rerun()
+
+        if current_stocks:
+            to_remove_stock = st.selectbox("Remove Stock", ["Select..."] + list(current_stocks.keys()))
+            if to_remove_stock != "Select..." and st.button(f"Drop {to_remove_stock}"):
+                del current_stocks[to_remove_stock]
+                users_data[current_user]["stocks"] = current_stocks
                 save_data('users', users_data)
                 st.rerun()
 
 # 3. INDICES & FEAR/GREED
-if 'carousel_idx' not in st.session_state:
-    st.session_state.carousel_idx = 0
+if 'carousel_idx' not in st.session_state: st.session_state.carousel_idx = 0
 
 st.subheader("Indexes")
 
@@ -372,73 +387,124 @@ for ticker, name in INDICES.items():
 cards.append({"name": "Fear & Greed Index", "value": str(f_score), "delta": f_rating, "is_pct": False, "raw_chg": 0})
 
 col_l, col_c1, col_c2, col_c3, col_r = st.columns([0.5, 2, 2, 2, 0.5])
-
 with col_l:
     st.markdown("<br><br>", unsafe_allow_html=True)
-    if st.button("◀", key="left_arrow"):
-        st.session_state.carousel_idx = (st.session_state.carousel_idx - 1) % len(cards)
-
+    if st.button("◀", key="left_arrow"): st.session_state.carousel_idx = (st.session_state.carousel_idx - 1) % len(cards)
 with col_r:
     st.markdown("<br><br>", unsafe_allow_html=True)
-    if st.button("▶", key="right_arrow"):
-        st.session_state.carousel_idx = (st.session_state.carousel_idx + 1) % len(cards)
+    if st.button("▶", key="right_arrow"): st.session_state.carousel_idx = (st.session_state.carousel_idx + 1) % len(cards)
 
 display_cols = [col_c1, col_c2, col_c3]
 for i in range(3):
     card_index = (st.session_state.carousel_idx + i) % len(cards)
     card = cards[card_index]
-    
     with display_cols[i]:
         delta_color = "normal" if card['is_pct'] else "off"
         st.metric(label=card['name'], value=card['value'], delta=card['delta'], delta_color=delta_color)
 
 st.markdown("---")
 
-# 4. PORTFOLIO TABLE & CHARTS
+# 4. PORTFOLIO TABLE & HEAT MAP CHARTS
 if current_user:
     st.subheader(f"{current_user}'s Portfolio")
-    my_stocks_list = users_data[current_user]
+    
+    my_stocks_dict = users_data[current_user].get("stocks", {})
+    my_stocks_list = list(my_stocks_dict.keys())
 
     if not my_stocks_list:
         st.info(f"👈 Add stocks in the sidebar to populate {current_user}'s portfolio.")
     else:
-        with st.spinner('Updating Portfolio...'):
+        if 'portfolio_view_idx' not in st.session_state:
+            st.session_state.portfolio_view_idx = 0
+
+        with st.spinner('Updating Portfolio Data...'):
             stock_df = get_market_data(my_stocks_list)
 
         if not stock_df.empty:
-            # Color formatter for price change %
-            def highlight_change(val):
-                if isinstance(val, (int, float)):
-                    color = COLORS['good_bg'] if val > 0 else COLORS['bad_bg'] if val < 0 else ''
-                    return f'background-color: {color}; color: black'
-                return ''
+            # Layout: Button | Content | Button
+            col_view_l, col_view_c, col_view_r = st.columns([0.05, 0.9, 0.05])
+            
+            with col_view_l:
+                # Add vertical breaks to roughly center the button next to the visual
+                st.markdown("<br><br><br><br><br><br>", unsafe_allow_html=True)
+                if st.button("◀", key="port_left"):
+                    st.session_state.portfolio_view_idx = (st.session_state.portfolio_view_idx - 1) % 2
+                    st.rerun()
+                    
+            with col_view_c:
+                if st.session_state.portfolio_view_idx == 0:
+                    # --- TABLE VIEW ---
+                    def highlight_change(val):
+                        if isinstance(val, (int, float)):
+                            color = COLORS['good_bg'] if val > 0 else COLORS['bad_bg'] if val < 0 else ''
+                            return f'background-color: {color}; color: black'
+                        return ''
 
-            # Color formatter for Put/Call Ratio (bullish < 1, bearish > 1)
-            def highlight_pc(val):
-                if pd.notnull(val) and isinstance(val, (int, float)):
-                    if val < 1.0:
-                        return f'background-color: {COLORS["good_bg"]}; color: black'
-                    elif val > 1.0:
-                        return f'background-color: {COLORS["bad_bg"]}; color: black'
-                return ''
+                    def highlight_pc(val):
+                        if isinstance(val, (int, float)):
+                            if val < 1.0: return f'background-color: {COLORS["good_bg"]}; color: black'
+                            elif val > 1.0: return f'background-color: {COLORS["bad_bg"]}; color: black'
+                        return ''
 
-            st.dataframe(
-                stock_df.style
-                .map(highlight_change, subset=['% Change'])
-                .map(highlight_pc, subset=['Put/Call Ratio'])
-                .format(
-                    formatter={
-                        "Price": "${:,.2f}", 
-                        "% Change": "{:+.2f}%",
-                        "Vol %ile (365d)": "{:.0f}%",
-                        "Put/Call Ratio": "{:.2f}"
-                    },
-                    na_rep="N/A" # This handles None data safely without crashing
-                ),
-                column_order=("Ticker", "Price", "% Change", "Vol %ile (365d)", "Put/Call Ratio", "Next Earn", "Next Div"),
-                hide_index=True,
-                width='stretch' # Fixes the Streamlit deprecation warning
-            )
+                    st.dataframe(
+                        stock_df.style
+                        .map(highlight_change, subset=['% Change'])
+                        .map(highlight_pc, subset=['Put/Call Ratio'])
+                        .format({
+                            "Price": "${:,.2f}", 
+                            "% Change": "{:+.2f}%",
+                            "Vol %ile (365d)": "{:.0f}%",
+                            "Put/Call Ratio": "{:.2f}"
+                        }),
+                        column_order=("Ticker", "Price", "% Change", "Vol %ile (365d)", "Put/Call Ratio", "Next Earn", "Next Div"),
+                        hide_index=True,
+                        use_container_width=True
+                    )
+                else:
+                    # --- HEAT MAP VIEW ---
+                    hm_data = []
+                    for ticker, info in my_stocks_dict.items():
+                        shares = info.get('shares', 0.0)
+                        if shares > 0:
+                            row = stock_df[stock_df['Ticker'] == ticker]
+                            if not row.empty:
+                                price = row.iloc[0]['Price']
+                                pct_change = row.iloc[0]['% Change']
+                                total_val = price * shares
+                                hm_data.append({
+                                    "Category": info.get('category', 'Uncategorized'),
+                                    "Ticker": ticker,
+                                    "Total Value": total_val,
+                                    "Daily Change (%)": pct_change,
+                                    "Custom Label": f"<b>{ticker}</b><br>{pct_change:+.2f}%"
+                                })
+                                
+                    if hm_data:
+                        plot_df = pd.DataFrame(hm_data)
+                        fig = px.treemap(
+                            plot_df,
+                            path=[px.Constant("Portfolio"), "Category", "Ticker"],
+                            values="Total Value",
+                            color="Daily Change (%)",
+                            color_continuous_scale=[(0, COLORS['text_bad']), (0.5, "white"), (1, COLORS['text_good'])],
+                            color_continuous_midpoint=0,
+                            custom_data=["Custom Label", "Daily Change (%)", "Total Value"]
+                        )
+                        fig.update_traces(
+                            texttemplate="%{customdata[0]}",
+                            textposition="middle center",
+                            hovertemplate="<b>%{label}</b><br>Value: $%{customdata[2]:,.2f}<br>Daily Change: %{customdata[1]:+.2f}%<extra></extra>"
+                        )
+                        fig.update_layout(margin=dict(t=30, l=10, r=10, b=10), height=600)
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning("No stocks with >0 shares found. Edit your stocks in the sidebar to assign shares.")
+
+            with col_view_r:
+                st.markdown("<br><br><br><br><br><br>", unsafe_allow_html=True)
+                if st.button("▶", key="port_right"):
+                    st.session_state.portfolio_view_idx = (st.session_state.portfolio_view_idx + 1) % 2
+                    st.rerun()
 
             st.markdown("---")
             
@@ -527,12 +593,9 @@ with st.spinner("Fetching upcoming calendar events..."):
                 today = datetime.now().date()
                 def calc_days_until(dt_val):
                     delta = (dt_val.date() - today).days
-                    if delta == 0:
-                        return "Today"
-                    elif delta == 1:
-                        return "1 day"
-                    else:
-                        return f"{delta} days"
+                    if delta == 0: return "Today"
+                    elif delta == 1: return "1 day"
+                    else: return f"{delta} days"
                         
                 events_df['Days Until'] = events_df['Start_dt'].apply(calc_days_until)
                 events_df['Start'] = events_df['Start_dt'].dt.strftime('%m/%d/%Y %H:%M:%S')
@@ -546,14 +609,11 @@ with st.spinner("Fetching upcoming calendar events..."):
                 st.dataframe(
                     final_events_df,
                     column_config={
-                        "urlSource": st.column_config.LinkColumn(
-                            "Link", 
-                            display_text="View Source"
-                        ),
+                        "urlSource": st.column_config.LinkColumn("Link", display_text="View Source"),
                         "Name": st.column_config.TextColumn("Event Name", width="large")
                     },
                     hide_index=True,
-                    width='stretch' # Fixes the Streamlit deprecation warning
+                    use_container_width=True
                 )
             else:
                 st.info(f"No high/medium impact events found for {', '.join(selected_currencies)} in the next 7 days.")

@@ -451,14 +451,14 @@ if current_user:
                         .map(highlight_change, subset=['% Change'])
                         .map(highlight_pc, subset=['Put/Call Ratio'])
                         .format({
-                            "Price": "${:,.2f}", 
-                            "% Change": "{:+.2f}%",
-                            "Vol %ile (365d)": "{:.0f}%",
-                            "Put/Call Ratio": "{:.2f}"
+                            "Price": lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A", 
+                            "% Change": lambda x: f"{x:+.2f}%" if pd.notna(x) else "N/A",
+                            "Vol %ile (365d)": lambda x: f"{x:.0f}%" if pd.notna(x) else "N/A",
+                            "Put/Call Ratio": lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
                         }),
                         column_order=("Ticker", "Price", "% Change", "Vol %ile (365d)", "Put/Call Ratio", "Next Earn", "Next Div"),
                         hide_index=True,
-                        use_container_width=True
+                        width="stretch"  # Replaced use_container_width=True
                     )
                 else:
                     # --- HEAT MAP VIEW ---
@@ -613,7 +613,7 @@ with st.spinner("Fetching upcoming calendar events..."):
                         "Name": st.column_config.TextColumn("Event Name", width="large")
                     },
                     hide_index=True,
-                    use_container_width=True
+                    width="stretch"  # Replaced use_container_width=True
                 )
             else:
                 st.info(f"No high/medium impact events found for {', '.join(selected_currencies)} in the next 7 days.")

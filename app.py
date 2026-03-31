@@ -169,8 +169,14 @@ def get_market_data(tickers):
                 vol_series = volumes[ticker]
 
             current_price = price_series.iloc[-1]
-            prev_close = price_series.iloc[-2]
+            
+            # Daily % Change
+            prev_close = price_series.iloc[-2] if len(price_series) >= 2 else current_price
             change_pct = ((current_price - prev_close) / prev_close) * 100
+            
+            # 5-Day % Change
+            close_5d = price_series.iloc[-6] if len(price_series) >= 6 else price_series.iloc[0]
+            change_5d_pct = ((current_price - close_5d) / close_5d) * 100
             
             vol_percentile = vol_series.rank(pct=True).iloc[-1] * 100
             vol_percentile = min(99.0, vol_percentile)
@@ -182,6 +188,7 @@ def get_market_data(tickers):
                 "Ticker": ticker,
                 "Price": current_price,
                 "% Change": change_pct,
+                "% Change (5d)": change_5d_pct,
                 "Vol %ile (365d)": vol_percentile,
                 "Put/Call Ratio": pc_ratio,
                 "Next Earn": earn_days,
@@ -448,17 +455,18 @@ if current_user:
 
                     st.dataframe(
                         stock_df.style
-                        .map(highlight_change, subset=['% Change'])
+                        .map(highlight_change, subset=['% Change', '% Change (5d)'])
                         .map(highlight_pc, subset=['Put/Call Ratio'])
                         .format({
                             "Price": lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A", 
                             "% Change": lambda x: f"{x:+.2f}%" if pd.notna(x) else "N/A",
+                            "% Change (5d)": lambda x: f"{x:+.2f}%" if pd.notna(x) else "N/A",
                             "Vol %ile (365d)": lambda x: f"{x:.0f}%" if pd.notna(x) else "N/A",
                             "Put/Call Ratio": lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
                         }),
-                        column_order=("Ticker", "Price", "% Change", "Vol %ile (365d)", "Put/Call Ratio", "Next Earn", "Next Div"),
+                        column_order=("Ticker", "Price", "% Change", "% Change (5d)", "Vol %ile (365d)", "Put/Call Ratio", "Next Earn", "Next Div"),
                         hide_index=True,
-                        width="stretch"  # Replaced use_container_width=True
+                        width="stretch"
                     )
                 else:
                     # --- HEAT MAP VIEW ---
@@ -613,7 +621,7 @@ with st.spinner("Fetching upcoming calendar events..."):
                         "Name": st.column_config.TextColumn("Event Name", width="large")
                     },
                     hide_index=True,
-                    width="stretch"  # Replaced use_container_width=True
+                    width="stretch"
                 )
             else:
                 st.info(f"No high/medium impact events found for {', '.join(selected_currencies)} in the next 7 days.")

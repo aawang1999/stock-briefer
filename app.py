@@ -222,10 +222,28 @@ def get_fear_and_greed():
 def get_historical_prices(ticker, days):
     try:
         stock = yf.Ticker(ticker)
-        hist = stock.history(period=f"{days}d") 
+        hist = stock.history(period=f"{days}d")
         return hist
     except:
         return pd.DataFrame()
+
+@st.cache_data(ttl=3600)
+def get_analyst_targets(ticker_symbol):
+    try:
+        stock = yf.Ticker(ticker_symbol)
+        info = stock.info
+        low = info.get('targetLowPrice')
+        mean = info.get('targetMeanPrice')
+        high = info.get('targetHighPrice')
+        current = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('previousClose')
+        return (
+            float(low) if low is not None else None,
+            float(mean) if mean is not None else None,
+            float(high) if high is not None else None,
+            float(current) if current is not None else None,
+        )
+    except:
+        return None, None, None, None
 
 @st.cache_data(ttl=43200)
 def get_economic_events():
@@ -257,6 +275,66 @@ def get_economic_events():
             os.remove(latest_file)
             
     return df
+
+def render_tracked_stock_bar(ticker, buy_price, low, mean, high, current):
+    if low is None or high is None or low >= high:
+        parts = [
+            '<div style="display:flex;align-items:center;padding:10px 0;border-bottom:1px solid rgba(250,250,250,0.08);">',
+            f'<div style="min-width:90px;font-weight:bold;font-size:15px;color:#fafafa;">{ticker}</div>',
+            '<div style="color:rgba(250,250,250,0.45);font-size:13px;margin-left:16px;">No analyst target prices available</div>',
+            '</div>',
+        ]
+        return ''.join(parts)
+
+    r = high - low
+
+    def to_pct(p):
+        return max(0.0, min(100.0, (p - low) / r * 100))
+
+    mean_pct = to_pct(mean) if mean is not None else 50.0
+    buy_pct = to_pct(buy_price)
+
+    current_marker = ''
+    if current is not None:
+        cp = to_pct(current)
+        current_marker = ''.join([
+            f'<div style="position:absolute;left:{cp:.2f}%;transform:translateX(-50%);text-align:center;bottom:0;z-index:2;">',
+            f'<span style="font-size:9px;color:rgba(250,250,250,0.95);display:block;white-space:nowrap;margin-bottom:2px;">${current:.2f}</span>',
+            '<span style="color:rgba(250,250,250,0.95);font-size:12px;line-height:1;">&#9679;</span>',
+            '</div>',
+        ])
+
+    buy_marker = ''.join([
+        f'<div style="position:absolute;left:{buy_pct:.2f}%;transform:translateX(-50%);text-align:center;bottom:0;z-index:1;">',
+        f'<span style="font-size:9px;color:#f0c040;display:block;white-space:nowrap;margin-bottom:2px;">${buy_price:.2f}</span>',
+        '<span style="color:#f0c040;font-size:12px;line-height:1;">&#9660;</span>',
+        '</div>',
+    ])
+
+    mean_label = f'${mean:.2f}' if mean is not None else ''
+
+    above = f'<div style="position:relative;height:44px;">{current_marker}{buy_marker}</div>'
+    bar = ''.join([
+        '<div style="height:18px;background:linear-gradient(to right,rgba(37,99,235,0.35),rgba(59,130,246,0.65));',
+        'border-radius:3px;position:relative;border:1px solid rgba(250,250,250,0.12);">',
+        f'<div style="position:absolute;left:{mean_pct:.2f}%;top:0;bottom:0;width:2px;background:rgba(255,255,255,0.5);transform:translateX(-50%);"></div>',
+        '</div>',
+    ])
+    below = ''.join([
+        '<div style="position:relative;height:20px;margin-top:5px;">',
+        f'<span style="position:absolute;left:0;font-size:9px;color:rgba(250,250,250,0.55);">${low:.2f}</span>',
+        f'<span style="position:absolute;left:{mean_pct:.2f}%;transform:translateX(-50%);font-size:9px;color:rgba(250,250,250,0.55);">{mean_label}</span>',
+        f'<span style="position:absolute;right:0;font-size:9px;color:rgba(250,250,250,0.55);">${high:.2f}</span>',
+        '</div>',
+    ])
+
+    parts = [
+        '<div style="display:flex;align-items:center;padding:10px 0;border-bottom:1px solid rgba(250,250,250,0.08);">',
+        f'<div style="min-width:90px;font-weight:bold;font-size:15px;color:#fafafa;flex-shrink:0;">{ticker}</div>',
+        f'<div style="flex:1;position:relative;padding:0 8px;">{above}{bar}{below}</div>',
+        '</div>',
+    ]
+    return ''.join(parts)
 
 # --- MAIN DASHBOARD ---
 default_users = {"Default User": {"categories": ["Uncategorized"], "stocks": {}}}
@@ -371,6 +449,32 @@ if current_user:
             if to_remove_stock != "Select..." and st.button(f"Drop {to_remove_stock}"):
                 del current_stocks[to_remove_stock]
                 users_data[current_user]["stocks"] = current_stocks
+                save_data('users', users_data)
+                st.rerun()
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader(f"{current_user}'s Tracked Stocks")
+
+    tracked_stocks = user_data.get("tracked_stocks", {})
+
+    with st.sidebar.expander("Manage Tracked Stocks", expanded=True):
+        with st.form("add_tracked_form", clear_on_submit=True):
+            tracked_ticker = st.text_input("Ticker", key="tracked_ticker_input").upper().strip()
+            buy_price_val = st.number_input("My Buy Price ($)", min_value=0.01, step=0.5, value=100.0)
+            if st.form_submit_button("Add / Update") and tracked_ticker:
+                if tracked_ticker in current_stocks:
+                    st.error(f"{tracked_ticker} is already in your portfolio.")
+                else:
+                    tracked_stocks[tracked_ticker] = buy_price_val
+                    users_data[current_user]["tracked_stocks"] = tracked_stocks
+                    save_data('users', users_data)
+                    st.rerun()
+
+        if tracked_stocks:
+            to_remove_tracked = st.selectbox("Remove Tracked Stock", ["Select..."] + list(tracked_stocks.keys()), key="remove_tracked_select")
+            if to_remove_tracked != "Select..." and st.button(f"Drop {to_remove_tracked}", key="drop_tracked_btn"):
+                del tracked_stocks[to_remove_tracked]
+                users_data[current_user]["tracked_stocks"] = tracked_stocks
                 save_data('users', users_data)
                 st.rerun()
 
@@ -571,6 +675,27 @@ if current_user:
                 with tab30: plot_chart(30)
                 with tab90: plot_chart(90)
                 with tab365: plot_chart(365)
+
+# --- TRACKED STOCKS SECTION ---
+if current_user:
+    tracked_stocks = users_data[current_user].get("tracked_stocks", {})
+    st.markdown("---")
+    st.subheader(f"{current_user}'s Tracked Stocks")
+
+    if not tracked_stocks:
+        st.info("👈 Add stocks to track in the sidebar.")
+    else:
+        target_data = {}
+        with st.spinner("Fetching analyst targets..."):
+            for ticker, buy_price in tracked_stocks.items():
+                low, mean, high, current_price = get_analyst_targets(ticker)
+                target_data[ticker] = {"buy_price": buy_price, "low": low, "mean": mean, "high": high, "current": current_price}
+
+        bars_html = ''.join(
+            render_tracked_stock_bar(t, d["buy_price"], d["low"], d["mean"], d["high"], d["current"])
+            for t, d in target_data.items()
+        )
+        st.markdown(f'<div style="padding:0 8px;">{bars_html}</div>', unsafe_allow_html=True)
 
 # --- EVENTS LOGIC ---
 st.markdown("---")

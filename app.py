@@ -276,10 +276,12 @@ def get_economic_events():
             
     return df
 
-def render_tracked_stock_bar(ticker, buy_price, low, mean, high, current):
+def render_tracked_stock_bar(ticker, buy_price, low, mean, high, current, is_last=False):
+    divider = '' if is_last else 'border-bottom:1px solid rgba(250,250,250,0.08);'
+
     if low is None or high is None or low >= high:
         parts = [
-            '<div style="display:flex;align-items:center;padding:10px 0;border-bottom:1px solid rgba(250,250,250,0.08);">',
+            f'<div style="display:flex;align-items:center;padding:10px 0;{divider}">',
             f'<div style="min-width:90px;font-weight:bold;font-size:15px;color:#fafafa;">{ticker}</div>',
             '<div style="color:rgba(250,250,250,0.45);font-size:13px;margin-left:16px;">No analyst target prices available</div>',
             '</div>',
@@ -315,8 +317,8 @@ def render_tracked_stock_bar(ticker, buy_price, low, mean, high, current):
 
     above = f'<div style="position:relative;height:44px;">{current_marker}{buy_marker}</div>'
     bar = ''.join([
-        '<div style="height:18px;background:linear-gradient(to right,rgba(37,99,235,0.35),rgba(59,130,246,0.65));',
-        'border-radius:3px;position:relative;border:1px solid rgba(250,250,250,0.12);">',
+        '<div style="height:18px;background:transparent;position:relative;',
+        'border:1px solid rgba(255,255,255,0.5);">',
         f'<div style="position:absolute;left:{mean_pct:.2f}%;top:0;bottom:0;width:2px;background:rgba(255,255,255,0.5);transform:translateX(-50%);"></div>',
         '</div>',
     ])
@@ -329,7 +331,7 @@ def render_tracked_stock_bar(ticker, buy_price, low, mean, high, current):
     ])
 
     parts = [
-        '<div style="display:flex;align-items:center;padding:10px 0;border-bottom:1px solid rgba(250,250,250,0.08);">',
+        f'<div style="display:flex;align-items:center;padding:10px 0;{divider}">',
         f'<div style="min-width:90px;font-weight:bold;font-size:15px;color:#fafafa;flex-shrink:0;">{ticker}</div>',
         f'<div style="flex:1;position:relative;padding:0 8px;">{above}{bar}{below}</div>',
         '</div>',
@@ -691,9 +693,10 @@ if current_user:
                 low, mean, high, current_price = get_analyst_targets(ticker)
                 target_data[ticker] = {"buy_price": buy_price, "low": low, "mean": mean, "high": high, "current": current_price}
 
+        items = list(target_data.items())
         bars_html = ''.join(
-            render_tracked_stock_bar(t, d["buy_price"], d["low"], d["mean"], d["high"], d["current"])
-            for t, d in target_data.items()
+            render_tracked_stock_bar(t, d["buy_price"], d["low"], d["mean"], d["high"], d["current"], is_last=(i == len(items) - 1))
+            for i, (t, d) in enumerate(items)
         )
         st.markdown(f'<div style="padding:0 8px;">{bars_html}</div>', unsafe_allow_html=True)
 

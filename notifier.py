@@ -1,18 +1,15 @@
 """
 Stock Briefer Telegram Notifier
 
-Sends two types of notifications:
-1. Daily morning summary at 9:30 AM Pacific (run via scheduler)
-2. Price alerts when tracked stocks hit buy price (run on a frequent interval)
+Modes:
+  python notifier.py --summary     Send summary to all linked users
+  python notifier.py --alerts      Check tracked stocks and send buy-price alerts
+  python notifier.py --bot         Run interactive Telegram bot (responds to /summary, /alerts)
 
 Environment variables required:
   TELEGRAM_BOT_TOKEN  - Bot token from @BotFather
   JSONBIN_BIN_ID      - JSONBin bin ID (same as Streamlit app)
   JSONBIN_KEY         - JSONBin API key (same as Streamlit app)
-
-Usage:
-  python notifier.py --morning     Send daily morning summary to all linked users
-  python notifier.py --alerts      Check tracked stocks and send buy-price alerts
 """
 
 import os
@@ -132,9 +129,7 @@ def get_portfolio_movers(tickers: list) -> tuple:
 
     changes.sort(key=lambda x: x[1], reverse=True)
     top_gainers = changes[:3]
-    top_losers = changes[-3:][::-1] if len(changes) >= 3 else list(reversed(changes[-len(changes):]))
-    # Reverse losers so worst is first
-    top_losers = sorted(top_losers, key=lambda x: x[1])
+    top_losers = sorted(changes[-3:], key=lambda x: x[1])
     return top_gainers, top_losers
 
 
@@ -176,10 +171,9 @@ def get_tracked_stock_prices(tracked_stocks: dict) -> list:
     return alerts
 
 
-def build_morning_message(user: str, user_data: dict) -> str:
-    lines = [f"<b>☀️ Good Morning, {user}!</b>", ""]
+def build_summary_message(user: str, user_data: dict) -> str:
+    lines = [f"<b>📋 Stock Summary for {user}</b>", ""]
 
-    # 1. Market Indices
     indices = get_index_data()
     if indices:
         lines.append("<b>📊 Market Indices</b>")
@@ -188,13 +182,11 @@ def build_morning_message(user: str, user_data: dict) -> str:
             lines.append(f"  {arrow} {idx['name']}: {idx['price']:,.2f} ({idx['pct']:+.2f}%)")
         lines.append("")
 
-    # 2. Fear & Greed
     score, rating = get_fear_and_greed()
     if score is not None:
         lines.append(f"<b>😨 Fear & Greed:</b> {score} ({rating})")
         lines.append("")
 
-    # 3. Portfolio movers
     stocks_dict = user_data.get("stocks", {})
     portfolio_tickers = list(stocks_dict.keys())
     if portfolio_tickers:
@@ -210,7 +202,6 @@ def build_morning_message(user: str, user_data: dict) -> str:
                 lines.append(f"  🔴 {t}: {pct:+.2f}%")
             lines.append("")
 
-        # 4. Upcoming earnings
         earnings = get_upcoming_earnings(portfolio_tickers)
         if earnings:
             lines.append("<b>📅 Earnings This Week</b>")
@@ -220,7 +211,6 @@ def build_morning_message(user: str, user_data: dict) -> str:
                 lines.append(f"  {t} — {d.strftime('%b %d')} ({day_str})")
             lines.append("")
 
-    # 5. Tracked stocks at or below buy price
     tracked_stocks = user_data.get("tracked_stocks", {})
     if tracked_stocks:
         alerts = get_tracked_stock_prices(tracked_stocks)
@@ -235,8 +225,20 @@ def build_morning_message(user: str, user_data: dict) -> str:
     return "\n".join(lines)
 
 
-def run_morning_summary():
-    print("Running morning summary...")
+def _alert_is_within_cooldown(already_alerted: dict, ticker: str) -> bool:
+    """Returns True if an alert was sent for this ticker within the last 24 hours."""
+    last_alert_iso = already_alerted.get(ticker)
+    if not last_alert_iso:
+        return False
+    try:
+        last_alert_time = datetime.fromisoformat(last_alert_iso)
+        return (datetime.now() - last_alert_time) < timedelta(hours=24)
+    except (ValueError, TypeError):
+        return False
+
+
+def run_summary():
+    print("Running summary...")
     users_data = load_users()
 
     for user, user_data in users_data.items():
@@ -248,7 +250,7 @@ def run_morning_summary():
             continue
 
         print(f"  Sending to {user}...")
-        message = build_morning_message(user, user_data)
+        message = build_summary_message(user, user_data)
         send_telegram_message(chat_id, message)
 
     print("Done.")
@@ -274,10 +276,7 @@ def run_price_alerts():
         alerts = get_tracked_stock_prices(tracked_stocks)
 
         for ticker, current, buy in alerts:
-            last_alert_date = already_alerted.get(ticker)
-            today_str = datetime.now().strftime("%Y-%m-%d")
-
-            if last_alert_date == today_str:
+            if _alert_is_within_cooldown(already_alerted, ticker):
                 continue
 
             message = (
@@ -288,11 +287,9 @@ def run_price_alerts():
             )
             if send_telegram_message(chat_id, message):
                 print(f"  Alert sent to {user} for {ticker} (${current:.2f} <= ${buy:.2f})")
-                already_alerted[ticker] = today_str
+                already_alerted[ticker] = datetime.now().isoformat()
                 changed = True
 
-        # Clean up alerts for stocks no longer tracked or above buy price
-        alert_tickers_today = {t for t, _, _ in alerts}
         for t in list(already_alerted.keys()):
             if t not in tracked_stocks:
                 del already_alerted[t]
@@ -310,17 +307,106 @@ def run_price_alerts():
     print("Done.")
 
 
+# --- Interactive Telegram Bot ---
+
+def _find_user_by_chat_id(users_data: dict, chat_id: str):
+    """Find the username associated with a chat_id."""
+    for user, user_data in users_data.items():
+        if isinstance(user_data, list):
+            continue
+        if str(user_data.get("telegram_chat_id", "")) == str(chat_id):
+            return user, user_data
+    return None, None
+
+
+def run_bot():
+    """Run the Telegram bot with long polling, responding to /summary and /alerts."""
+    from telegram import Update, BotCommand
+    from telegram.ext import Application, CommandHandler, ContextTypes
+
+    async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        users_data = load_users()
+        user, _ = _find_user_by_chat_id(users_data, str(chat_id))
+        if user:
+            await update.message.reply_text(
+                f"✅ Connected as {user}.\n\n"
+                "Commands:\n"
+                "/summary — Get your stock summary\n"
+                "/alerts — Check for buy-price alerts"
+            )
+        else:
+            await update.message.reply_text(
+                f"Your chat ID is: <code>{chat_id}</code>\n\n"
+                "Enter this in the Stock Briefer app sidebar under "
+                "Telegram Notifications to link your account.",
+                parse_mode="HTML"
+            )
+
+    async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = str(update.effective_chat.id)
+        users_data = load_users()
+        user, user_data = _find_user_by_chat_id(users_data, chat_id)
+        if not user:
+            await update.message.reply_text("⚠️ Account not linked. Send /start for instructions.")
+            return
+
+        await update.message.reply_text("⏳ Fetching your summary...")
+        message = build_summary_message(user, user_data)
+        await update.message.reply_text(message, parse_mode="HTML")
+
+    async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = str(update.effective_chat.id)
+        users_data = load_users()
+        user, user_data = _find_user_by_chat_id(users_data, chat_id)
+        if not user:
+            await update.message.reply_text("⚠️ Account not linked. Send /start for instructions.")
+            return
+
+        tracked_stocks = user_data.get("tracked_stocks", {})
+        if not tracked_stocks:
+            await update.message.reply_text("You have no tracked stocks.")
+            return
+
+        await update.message.reply_text("⏳ Checking prices...")
+        alerts = get_tracked_stock_prices(tracked_stocks)
+        if not alerts:
+            await update.message.reply_text("✅ No tracked stocks are at or below your buy price.")
+        else:
+            lines = ["<b>🎯 Buy Price Alerts</b>", ""]
+            for t, current, buy in alerts:
+                lines.append(f"⚡ <b>{t}</b>: ${current:.2f} (buy target: ${buy:.2f})")
+            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    async def post_init(application: Application):
+        await application.bot.set_my_commands([
+            BotCommand("summary", "Get your stock summary"),
+            BotCommand("alerts", "Check buy-price alerts"),
+            BotCommand("start", "Link your account"),
+        ])
+
+    print("Starting Stock Briefer bot (polling)...")
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("summary", cmd_summary))
+    app.add_handler(CommandHandler("alerts", cmd_alerts))
+    app.run_polling(allowed_updates=["message"])
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stock Briefer Telegram Notifier")
-    parser.add_argument("--morning", action="store_true", help="Send daily morning summary")
+    parser.add_argument("--summary", action="store_true", help="Send summary to all linked users")
     parser.add_argument("--alerts", action="store_true", help="Check and send buy-price alerts")
+    parser.add_argument("--bot", action="store_true", help="Run interactive Telegram bot")
     args = parser.parse_args()
 
-    if not args.morning and not args.alerts:
-        print("Usage: python notifier.py --morning | --alerts")
+    if not args.summary and not args.alerts and not args.bot:
+        print("Usage: python notifier.py --summary | --alerts | --bot")
         sys.exit(1)
 
-    if args.morning:
-        run_morning_summary()
+    if args.bot:
+        run_bot()
+    if args.summary:
+        run_summary()
     if args.alerts:
         run_price_alerts()

@@ -10,9 +10,8 @@
 ## 2. Get Your Chat ID
 
 1. Open your new bot in Telegram and send `/start`
-2. Visit `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates` in a browser
-3. Find `"chat":{"id":123456789}` in the response — that number is your chat ID
-4. Enter this chat ID in the Stock Briefer sidebar under **Telegram Notifications**
+2. The bot will reply with your chat ID
+3. Enter this chat ID in the Stock Briefer sidebar under **Telegram Notifications**
 
 ## 3. Configure Environment Variables
 
@@ -20,82 +19,74 @@ The notifier script needs three environment variables:
 
 ```bash
 export TELEGRAM_BOT_TOKEN="your-bot-token-here"
-export JSONBIN_BIN_ID="your-jsonbin-id"      # same as in .streamlit/secrets.toml
-export JSONBIN_KEY="your-jsonbin-key"          # same as in .streamlit/secrets.toml
+export JSONBIN_BIN_ID="your-jsonbin-id"
+export JSONBIN_KEY="your-jsonbin-key"
 ```
 
-## 4. Run the Notifier
+## 4. Running the Notifier
 
 ```bash
-# Send the daily morning summary
-python notifier.py --morning
+# Send summary to all linked users (scheduled daily)
+python notifier.py --summary
 
 # Check tracked stocks and send buy-price alerts
 python notifier.py --alerts
+
+# Run the interactive bot (responds to /summary and /alerts in Telegram)
+python notifier.py --bot
 ```
 
-## 5. Schedule It (GitHub Actions Example)
+### Bot Commands (available in Telegram)
 
-Create `.github/workflows/notify.yml`:
+| Command | Description |
+|---------|-------------|
+| `/start` | Link your account (shows your chat ID) |
+| `/summary` | Get your stock summary on demand |
+| `/alerts` | Check if any tracked stocks hit your buy price |
 
-```yaml
-name: Stock Notifications
+## 5. Deployment
 
-on:
-  schedule:
-    # Morning summary at 9:30 AM Pacific (16:30 UTC)
-    - cron: '30 16 * * 1-5'
-    # Price alerts every 15 minutes during market hours (6:30 AM - 1:00 PM Pacific = 13:30-20:00 UTC)
-    - cron: '*/15 13-20 * * 1-5'
+The system has two parts:
 
-  workflow_dispatch:  # manual trigger
+### A. Scheduled jobs (GitHub Actions)
 
-jobs:
-  notify:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+Already configured in `.github/workflows/notify.yml`:
+- **Summary** at 9:30 AM Pacific, Mon–Fri
+- **Price alerts** every 15 min during market hours
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+Secrets needed in GitHub (Settings → Secrets → Actions):
+- `TELEGRAM_BOT_TOKEN`
+- `JSONBIN_BIN_ID`
+- `JSONBIN_KEY`
 
-      - run: pip install requests yfinance
+### B. Interactive bot (Render — free tier)
 
-      - name: Morning summary
-        if: github.event.schedule == '30 16 * * 1-5' || github.event_name == 'workflow_dispatch'
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          JSONBIN_BIN_ID: ${{ secrets.JSONBIN_BIN_ID }}
-          JSONBIN_KEY: ${{ secrets.JSONBIN_KEY }}
-        run: python notifier.py --morning
+The bot needs to run continuously to respond to commands in real-time.
 
-      - name: Price alerts
-        if: github.event.schedule == '*/15 13-20 * * 1-5'
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          JSONBIN_BIN_ID: ${{ secrets.JSONBIN_BIN_ID }}
-          JSONBIN_KEY: ${{ secrets.JSONBIN_KEY }}
-        run: python notifier.py --alerts
+1. Go to [render.com](https://render.com) and sign up (free)
+2. Click **New** → **Background Worker**
+3. Connect your GitHub repo (`aawang1999/stock-briefer`)
+4. Render will auto-detect `render.yaml` — confirm the settings
+5. Add environment variables: `TELEGRAM_BOT_TOKEN`, `JSONBIN_BIN_ID`, `JSONBIN_KEY`
+6. Deploy
+
+Alternatively, run it locally:
+```bash
+export TELEGRAM_BOT_TOKEN="..."
+export JSONBIN_BIN_ID="..."
+export JSONBIN_KEY="..."
+python notifier.py --bot
 ```
 
-Then add `TELEGRAM_BOT_TOKEN`, `JSONBIN_BIN_ID`, and `JSONBIN_KEY` as
-repository secrets in GitHub (Settings → Secrets and variables → Actions).
+## Price Alert Behavior
 
-## 5b. Schedule It (cron on a server)
-
-```crontab
-# Morning summary at 9:30 AM Pacific (adjust for your server's timezone)
-30 9 * * 1-5 cd /path/to/stock-briefer && python notifier.py --morning
-
-# Price alerts every 15 min during market hours
-*/15 6-13 * * 1-5 cd /path/to/stock-briefer && python notifier.py --alerts
-```
+- When a tracked stock reaches or falls below your buy price, an alert is sent immediately
+- After sending an alert for a stock, no repeat alert is sent until **24 hours** have passed
+- You can always check manually with `/alerts` in Telegram regardless of cooldown
 
 ## Security Notes
 
-- The bot token is stored only in environment variables / GitHub secrets
-- User chat IDs are stored in JSONBin (same as other app data) and displayed
-  as a password field in the Streamlit UI
-- The bot can only send messages — it does not read your Telegram messages
+- The bot token is stored only in environment variables / platform secrets
+- User chat IDs are stored in JSONBin (same as other app data) and entered via a password field
+- The bot only responds to users whose chat ID is linked in the app
 - No personal Telegram handles or phone numbers are collected or stored

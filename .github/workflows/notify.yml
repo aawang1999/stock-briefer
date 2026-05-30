@@ -2,7 +2,7 @@ name: Stock Notifications
 
 on:
   schedule:
-    # Morning summary at 9:30 AM Pacific (16:30 UTC)
+    # Summary at 9:30 AM Pacific (16:30 UTC), Mon-Fri
     - cron: '30 16 * * 1-5'
     # Price alerts every 15 minutes during market hours
     # Market hours: 6:30 AM - 1:00 PM Pacific = 13:30 - 20:00 UTC
@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  morning-summary:
+  summary:
     runs-on: ubuntu-latest
     if: github.event.schedule == '30 16 * * 1-5' || github.event_name == 'workflow_dispatch'
     steps:
@@ -24,12 +24,12 @@ jobs:
       - name: Install dependencies
         run: pip install requests yfinance
 
-      - name: Send morning summary
+      - name: Send summary
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           JSONBIN_BIN_ID: ${{ secrets.JSONBIN_BIN_ID }}
           JSONBIN_KEY: ${{ secrets.JSONBIN_KEY }}
-        run: python notifier.py --morning
+        run: python notifier.py --summary
 
   price-alerts:
     runs-on: ubuntu-latest

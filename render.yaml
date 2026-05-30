@@ -1,0 +1,13 @@
+services:
+  - type: worker
+    name: stock-briefer-bot
+    runtime: python
+    buildCommand: pip install requests yfinance python-telegram-bot
+    startCommand: python notifier.py --bot
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: JSONBIN_BIN_ID
+        sync: false
+      - key: JSONBIN_KEY
+        sync: false

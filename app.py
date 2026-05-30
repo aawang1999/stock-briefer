@@ -288,12 +288,24 @@ def render_tracked_stock_bar(ticker, buy_price, low, mean, high, current, is_las
         ]
         return ''.join(parts)
 
-    r = high - low
+    all_values = [low, high, buy_price]
+    if current is not None:
+        all_values.append(current)
+    if mean is not None:
+        all_values.append(mean)
+    scale_min = min(all_values)
+    scale_max = max(all_values)
+    if scale_max == scale_min:
+        scale_max = scale_min + 1
+
+    r = scale_max - scale_min
 
     def to_pct(p):
-        return max(0.0, min(100.0, (p - low) / r * 100))
+        return max(0.0, min(100.0, (p - scale_min) / r * 100))
 
-    mean_pct = to_pct(mean) if mean is not None else 50.0
+    low_pct = to_pct(low)
+    high_pct = to_pct(high)
+    mean_pct = to_pct(mean) if mean is not None else (low_pct + high_pct) / 2
     buy_pct = to_pct(buy_price)
 
     current_marker = ''
@@ -317,23 +329,24 @@ def render_tracked_stock_bar(ticker, buy_price, low, mean, high, current, is_las
 
     above = f'<div style="position:relative;height:44px;">{current_marker}{buy_marker}</div>'
     bar = ''.join([
-        '<div style="height:18px;background:transparent;position:relative;',
+        f'<div style="position:absolute;left:{low_pct:.2f}%;width:{high_pct - low_pct:.2f}%;height:18px;background:transparent;',
         'border:1px solid rgba(255,255,255,0.5);">',
-        f'<div style="position:absolute;left:{mean_pct:.2f}%;top:0;bottom:0;width:2px;background:rgba(255,255,255,0.5);transform:translateX(-50%);"></div>',
+        f'<div style="position:absolute;left:{((mean_pct - low_pct) / (high_pct - low_pct) * 100) if high_pct != low_pct else 50:.2f}%;top:0;bottom:0;width:2px;background:rgba(255,255,255,0.5);transform:translateX(-50%);"></div>',
         '</div>',
     ])
+    bar_container = f'<div style="position:relative;height:18px;">{bar}</div>'
     below = ''.join([
         '<div style="position:relative;height:20px;margin-top:5px;">',
-        f'<span style="position:absolute;left:0;font-size:9px;color:rgba(250,250,250,0.55);">${low:.2f}</span>',
-        f'<span style="position:absolute;left:{mean_pct:.2f}%;transform:translateX(-50%);font-size:9px;color:rgba(250,250,250,0.55);">{mean_label}</span>',
-        f'<span style="position:absolute;right:0;font-size:9px;color:rgba(250,250,250,0.55);">${high:.2f}</span>',
+        f'<span style="position:absolute;left:{low_pct:.2f}%;transform:translateX(-50%);font-size:9px;color:rgba(250,250,250,0.55);white-space:nowrap;">${low:.2f}</span>',
+        f'<span style="position:absolute;left:{mean_pct:.2f}%;transform:translateX(-50%);font-size:9px;color:rgba(250,250,250,0.55);white-space:nowrap;">{mean_label}</span>',
+        f'<span style="position:absolute;left:{high_pct:.2f}%;transform:translateX(-50%);font-size:9px;color:rgba(250,250,250,0.55);white-space:nowrap;">${high:.2f}</span>',
         '</div>',
     ])
 
     parts = [
         f'<div style="display:flex;align-items:center;padding:10px 0;{divider}">',
         f'<div style="min-width:90px;font-weight:bold;font-size:15px;color:#fafafa;flex-shrink:0;">{ticker}</div>',
-        f'<div style="flex:1;position:relative;padding:0 8px;">{above}{bar}{below}</div>',
+        f'<div style="flex:1;position:relative;padding:0 8px;">{above}{bar_container}{below}</div>',
         '</div>',
     ]
     return ''.join(parts)
@@ -693,7 +706,7 @@ if current_user:
                 low, mean, high, current_price = get_analyst_targets(ticker)
                 target_data[ticker] = {"buy_price": buy_price, "low": low, "mean": mean, "high": high, "current": current_price}
 
-        items = list(target_data.items())
+        items = sorted(target_data.items(), key=lambda x: x[0])
         bars_html = ''.join(
             render_tracked_stock_bar(t, d["buy_price"], d["low"], d["mean"], d["high"], d["current"], is_last=(i == len(items) - 1))
             for i, (t, d) in enumerate(items)

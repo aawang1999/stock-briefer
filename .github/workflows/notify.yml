@@ -4,9 +4,9 @@ on:
   schedule:
     # Summary at 9:30 AM Pacific (16:30 UTC), Mon-Fri
     - cron: '30 16 * * 1-5'
-    # Price alerts every 15 minutes during market hours
+    # Price alerts every hour during market hours
     # Market hours: 6:30 AM - 1:00 PM Pacific = 13:30 - 20:00 UTC
-    - cron: '*/15 13-20 * * 1-5'
+    - cron: '30 13-20 * * 1-5'
 
   workflow_dispatch:
 
@@ -33,7 +33,7 @@ jobs:
 
   price-alerts:
     runs-on: ubuntu-latest
-    if: github.event.schedule == '*/15 13-20 * * 1-5'
+    if: github.event.schedule == '30 13-20 * * 1-5'
     steps:
       - uses: actions/checkout@v4
 

@@ -468,6 +468,27 @@ if current_user:
                 st.rerun()
 
     st.sidebar.markdown("---")
+    st.sidebar.subheader("Telegram Notifications")
+
+    current_chat_id = user_data.get("telegram_chat_id", "")
+    with st.sidebar.expander("Link Telegram", expanded=False):
+        st.markdown(
+            "Send `/start` to your bot, then enter the chat ID it provides.",
+            help="Your chat ID is never displayed publicly."
+        )
+        chat_id_input = st.text_input(
+            "Chat ID", value=str(current_chat_id) if current_chat_id else "",
+            type="password", key="telegram_chat_id_input"
+        )
+        if st.button("Save Chat ID", key="save_chat_id_btn"):
+            users_data[current_user]["telegram_chat_id"] = chat_id_input.strip()
+            save_data('users', users_data)
+            st.success("Telegram linked!")
+            st.rerun()
+        if current_chat_id:
+            st.caption("✓ Telegram linked")
+
+    st.sidebar.markdown("---")
     st.sidebar.subheader(f"{current_user}'s Tracked Stocks")
 
     tracked_stocks = user_data.get("tracked_stocks", {})

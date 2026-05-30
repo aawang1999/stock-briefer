@@ -4,3 +4,4 @@ requests
 yfinance
 plotly
 ecocal
+python-telegram-bot

@@ -70,24 +70,30 @@ def _local_extrema_indices(arr, order=3, find_max=False):
             indices.append(i)
     return indices
 
-def detect_price_tunnel(closes):
-    """Return upper/lower trend-line bounds at the end of the series if a clear tunnel exists."""
-    y = closes.values.astype(float) if hasattr(closes, 'values') else np.asarray(closes, dtype=float)
-    n = len(y)
+def detect_price_tunnel(highs, lows, closes):
+    """Return upper/lower trend-line bounds at the end of the series if a clear tunnel exists.
+
+    Uses daily candlestick highs/lows to fit trend lines and checks that most
+    1-day candles stayed within the channel.
+    """
+    highs_arr = highs.values.astype(float) if hasattr(highs, 'values') else np.asarray(highs, dtype=float)
+    lows_arr = lows.values.astype(float) if hasattr(lows, 'values') else np.asarray(lows, dtype=float)
+    closes_arr = closes.values.astype(float) if hasattr(closes, 'values') else np.asarray(closes, dtype=float)
+    n = len(closes_arr)
     if n < 15:
         return None
 
     x = np.arange(n)
-    min_idx = _local_extrema_indices(y, order=3, find_max=False)
-    max_idx = _local_extrema_indices(y, order=3, find_max=True)
+    min_idx = _local_extrema_indices(lows_arr, order=3, find_max=False)
+    max_idx = _local_extrema_indices(highs_arr, order=3, find_max=True)
 
     if len(min_idx) < 2 or len(max_idx) < 2:
         return None
 
-    lower_slope, lower_intercept = np.polyfit(min_idx, y[min_idx], 1)
-    upper_slope, upper_intercept = np.polyfit(max_idx, y[max_idx], 1)
+    lower_slope, lower_intercept = np.polyfit(min_idx, lows_arr[min_idx], 1)
+    upper_slope, upper_intercept = np.polyfit(max_idx, highs_arr[max_idx], 1)
 
-    avg_price = np.mean(y)
+    avg_price = np.mean(closes_arr)
     if avg_price <= 0:
         return None
 
@@ -105,7 +111,7 @@ def detect_price_tunnel(closes):
     if channel_width_pct < 0.02:
         return None
 
-    contained = np.sum((y >= lower_line) & (y <= upper_line)) / n
+    contained = np.sum((closes_arr >= lower_line) & (closes_arr <= upper_line)) / n
     if contained < 0.70:
         return None
 
@@ -114,37 +120,51 @@ def detect_price_tunnel(closes):
         'lower_at_end': lower_slope * (n - 1) + lower_intercept,
     }
 
-def compute_tunnel_signals(price_series):
+def compute_tunnel_signals(high_series, low_series, close_series):
     signals = []
     for label, days in TUNNEL_PERIODS.items():
-        if len(price_series) < max(days, 15):
+        if len(close_series) < max(days, 15):
             continue
-        segment = price_series.iloc[-days:]
-        tunnel = detect_price_tunnel(segment)
+        high_segment = high_series.iloc[-days:]
+        low_segment = low_series.iloc[-days:]
+        close_segment = close_series.iloc[-days:]
+        tunnel = detect_price_tunnel(high_segment, low_segment, close_segment)
         if not tunnel:
             continue
 
-        current_price = segment.iloc[-1]
+        if len(close_segment) < 2:
+            continue
+
+        prev_price = close_segment.iloc[-2]
+        current_price = close_segment.iloc[-1]
         upper = tunnel['upper_at_end']
         lower = tunnel['lower_at_end']
 
-        if current_price >= upper:
+        if prev_price < upper and current_price >= upper:
             signals.append({'period': label, 'color': 'green'})
-        elif current_price <= lower:
+        elif prev_price > lower and current_price <= lower:
             signals.append({'period': label, 'color': 'red'})
 
     return signals
 
 def compute_sma_signals(price_series, current_price):
     signals = []
+    if len(price_series) < 2:
+        return signals
+
+    prev_price = price_series.iloc[-2]
     for label, window in SMA_PERIODS.items():
-        if len(price_series) < window:
+        if len(price_series) < window + 1:
             continue
-        sma = price_series.rolling(window).mean().iloc[-1]
-        if pd.isna(sma):
+        sma_series = price_series.rolling(window).mean()
+        current_sma = sma_series.iloc[-1]
+        prev_sma = sma_series.iloc[-2]
+        if pd.isna(current_sma) or pd.isna(prev_sma):
             continue
-        color = 'green' if current_price >= sma else 'red'
-        signals.append({'period': label, 'color': color})
+        if prev_price < prev_sma and current_price >= current_sma:
+            signals.append({'period': label, 'color': 'green'})
+        elif prev_price > prev_sma and current_price < current_sma:
+            signals.append({'period': label, 'color': 'red'})
     return signals
 
 def render_signal_badge(period, color):
@@ -297,20 +317,29 @@ def get_market_data(tickers):
 
     if isinstance(df.columns, pd.MultiIndex):
         closes = df['Close']
+        highs = df['High']
+        lows = df['Low']
         volumes = df['Volume']
     else:
         closes = df
+        highs = df['High'] if 'High' in df.columns else df
+        lows = df['Low'] if 'Low' in df.columns else df
         volumes = df['Volume'] if 'Volume' in df.columns else None
 
     for ticker in tickers:
         try:
             if len(tickers) == 1 and isinstance(closes, pd.Series):
-                price_series, vol_series = closes, volumes
+                price_series, high_series, low_series, vol_series = closes, highs, lows, volumes
             elif len(tickers) == 1 and isinstance(closes, pd.DataFrame):
-                price_series = closes[closes.columns[0]]
+                col = closes.columns[0]
+                price_series = closes[col]
+                high_series = highs[col]
+                low_series = lows[col]
                 vol_series = volumes[volumes.columns[0]]
             else:
                 price_series = closes[ticker]
+                high_series = highs[ticker]
+                low_series = lows[ticker]
                 vol_series = volumes[ticker]
 
             current_price = price_series.iloc[-1]
@@ -328,7 +357,7 @@ def get_market_data(tickers):
 
             div_days, earn_days = get_stock_metadata(ticker)
             pc_ratio = get_put_call_ratio(ticker)
-            tunnel_signals = compute_tunnel_signals(price_series)
+            tunnel_signals = compute_tunnel_signals(high_series, low_series, price_series)
             sma_signals = compute_sma_signals(price_series, current_price)
 
             data.append({

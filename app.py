@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import requests
 import yfinance as yf
 from datetime import datetime, timedelta
@@ -55,6 +56,150 @@ COLORS = {
     'good_bg': '#d4f7d4', 'bad_bg': '#f7d4d4', 
     'text_good': 'green', 'text_bad': 'red'
 }
+
+TUNNEL_PERIODS = {'1mo': 21, '3mo': 63, '6mo': 126, '1yr': 252}
+SMA_PERIODS = {'50d': 50, '100d': 100, '200d': 200}
+
+def _local_extrema_indices(arr, order=3, find_max=False):
+    indices = []
+    for i in range(order, len(arr) - order):
+        window = arr[i - order:i + order + 1]
+        if find_max and arr[i] == np.max(window):
+            indices.append(i)
+        elif not find_max and arr[i] == np.min(window):
+            indices.append(i)
+    return indices
+
+def detect_price_tunnel(closes):
+    """Return upper/lower trend-line bounds at the end of the series if a clear tunnel exists."""
+    y = closes.values.astype(float) if hasattr(closes, 'values') else np.asarray(closes, dtype=float)
+    n = len(y)
+    if n < 15:
+        return None
+
+    x = np.arange(n)
+    min_idx = _local_extrema_indices(y, order=3, find_max=False)
+    max_idx = _local_extrema_indices(y, order=3, find_max=True)
+
+    if len(min_idx) < 2 or len(max_idx) < 2:
+        return None
+
+    lower_slope, lower_intercept = np.polyfit(min_idx, y[min_idx], 1)
+    upper_slope, upper_intercept = np.polyfit(max_idx, y[max_idx], 1)
+
+    avg_price = np.mean(y)
+    if avg_price <= 0:
+        return None
+
+    slope_scale = avg_price / n
+    if slope_scale > 0 and abs(upper_slope - lower_slope) / slope_scale > 0.6:
+        return None
+
+    upper_line = upper_slope * x + upper_intercept
+    lower_line = lower_slope * x + lower_intercept
+
+    if np.mean(upper_line - lower_line) <= 0:
+        return None
+
+    channel_width_pct = np.mean(upper_line - lower_line) / avg_price
+    if channel_width_pct < 0.02:
+        return None
+
+    contained = np.sum((y >= lower_line) & (y <= upper_line)) / n
+    if contained < 0.70:
+        return None
+
+    return {
+        'upper_at_end': upper_slope * (n - 1) + upper_intercept,
+        'lower_at_end': lower_slope * (n - 1) + lower_intercept,
+    }
+
+def compute_tunnel_signals(price_series):
+    signals = []
+    for label, days in TUNNEL_PERIODS.items():
+        if len(price_series) < max(days, 15):
+            continue
+        segment = price_series.iloc[-days:]
+        tunnel = detect_price_tunnel(segment)
+        if not tunnel:
+            continue
+
+        current_price = segment.iloc[-1]
+        upper = tunnel['upper_at_end']
+        lower = tunnel['lower_at_end']
+
+        if current_price >= upper:
+            signals.append({'period': label, 'color': 'green'})
+        elif current_price <= lower:
+            signals.append({'period': label, 'color': 'red'})
+
+    return signals
+
+def compute_sma_signals(price_series, current_price):
+    signals = []
+    for label, window in SMA_PERIODS.items():
+        if len(price_series) < window:
+            continue
+        sma = price_series.rolling(window).mean().iloc[-1]
+        if pd.isna(sma):
+            continue
+        color = 'green' if current_price >= sma else 'red'
+        signals.append({'period': label, 'color': color})
+    return signals
+
+def render_signal_badge(period, color):
+    bg = COLORS['text_good'] if color == 'green' else COLORS['text_bad']
+    return (
+        f'<span style="display:inline-block;background:{bg};color:white;border-radius:999px;'
+        f'padding:4px 8px;font-size:10px;font-weight:600;margin:2px;min-width:32px;text-align:center;">'
+        f'{period}</span>'
+    )
+
+def render_signals_cell(signals):
+    if not signals:
+        return ''
+    return ''.join(render_signal_badge(s['period'], s['color']) for s in signals)
+
+def pct_change_bg(val):
+    if not isinstance(val, (int, float)) or pd.isna(val):
+        return ''
+    if val > 0:
+        return f'background-color:{COLORS["good_bg"]};color:black;'
+    if val < 0:
+        return f'background-color:{COLORS["bad_bg"]};color:black;'
+    return ''
+
+def render_indicators_table(df):
+    header = (
+        '<table style="width:100%;border-collapse:collapse;font-size:14px;">'
+        '<thead><tr style="border-bottom:1px solid rgba(250,250,250,0.2);">'
+        '<th style="text-align:left;padding:8px 12px;">Ticker</th>'
+        '<th style="text-align:left;padding:8px 12px;">Price</th>'
+        '<th style="text-align:left;padding:8px 12px;">% Change</th>'
+        '<th style="text-align:left;padding:8px 12px;">% Change (5d)</th>'
+        '<th style="text-align:left;padding:8px 12px;">Tunnels</th>'
+        '<th style="text-align:left;padding:8px 12px;">SMAs</th>'
+        '</tr></thead><tbody>'
+    )
+    rows = []
+    for _, row in df.iterrows():
+        chg_bg = pct_change_bg(row['% Change'])
+        chg5_bg = pct_change_bg(row['% Change (5d)'])
+        price = row['Price']
+        price_str = f'${price:,.2f}' if pd.notna(price) else 'N/A'
+        chg_str = f"{row['% Change']:+.2f}%" if pd.notna(row['% Change']) else 'N/A'
+        chg5_str = f"{row['% Change (5d)']:+.2f}%" if pd.notna(row['% Change (5d)']) else 'N/A'
+        rows.append(
+            f'<tr style="border-bottom:1px solid rgba(250,250,250,0.08);">'
+            f'<td style="padding:8px 12px;font-weight:600;">{row["Ticker"]}</td>'
+            f'<td style="padding:8px 12px;">{price_str}</td>'
+            f'<td style="padding:8px 12px;{chg_bg}">{chg_str}</td>'
+            f'<td style="padding:8px 12px;{chg5_bg}">{chg5_str}</td>'
+            f'<td style="padding:8px 12px;">{render_signals_cell(row["tunnel_signals"])}</td>'
+            f'<td style="padding:8px 12px;">{render_signals_cell(row["sma_signals"])}</td>'
+            f'</tr>'
+        )
+    return header + ''.join(rows) + '</tbody></table>'
 
 # --- PERSISTENCE FUNCTIONS ---
 def load_data(key, default_data=None):
@@ -183,6 +328,8 @@ def get_market_data(tickers):
 
             div_days, earn_days = get_stock_metadata(ticker)
             pc_ratio = get_put_call_ratio(ticker)
+            tunnel_signals = compute_tunnel_signals(price_series)
+            sma_signals = compute_sma_signals(price_series, current_price)
 
             data.append({
                 "Ticker": ticker,
@@ -192,7 +339,9 @@ def get_market_data(tickers):
                 "Vol %ile (365d)": vol_percentile,
                 "Put/Call Ratio": pc_ratio,
                 "Next Earn": earn_days,
-                "Next Div": div_days
+                "Next Div": div_days,
+                "tunnel_signals": tunnel_signals,
+                "sma_signals": sma_signals,
             })
         except Exception: continue
 
@@ -575,7 +724,7 @@ if current_user:
                 # Add vertical breaks to roughly center the button next to the visual
                 st.markdown("<br><br><br><br><br><br>", unsafe_allow_html=True)
                 if st.button("◀", key="port_left"):
-                    st.session_state.portfolio_view_idx = (st.session_state.portfolio_view_idx - 1) % 2
+                    st.session_state.portfolio_view_idx = (st.session_state.portfolio_view_idx - 1) % 3
                     st.rerun()
                     
             with col_view_c:
@@ -608,6 +757,9 @@ if current_user:
                         hide_index=True,
                         width="stretch"
                     )
+                elif st.session_state.portfolio_view_idx == 1:
+                    # --- TUNNELS & SMAs TABLE VIEW ---
+                    st.markdown(render_indicators_table(stock_df), unsafe_allow_html=True)
                 else:
                     # --- HEAT MAP VIEW ---
                     hm_data = []
@@ -651,7 +803,7 @@ if current_user:
             with col_view_r:
                 st.markdown("<br><br><br><br><br><br>", unsafe_allow_html=True)
                 if st.button("▶", key="port_right"):
-                    st.session_state.portfolio_view_idx = (st.session_state.portfolio_view_idx + 1) % 2
+                    st.session_state.portfolio_view_idx = (st.session_state.portfolio_view_idx + 1) % 3
                     st.rerun()
 
             st.markdown("---")

@@ -532,7 +532,7 @@ def render_tracked_stock_bar(ticker, buy_price, low, mean, high, current, is_las
 # --- MAIN DASHBOARD ---
 default_users = {"Default User": {"categories": ["Uncategorized"], "stocks": {}}}
 users_data = load_data('users', default_users)
-user_list = list(users_data.keys())
+user_list = [u for u in users_data.keys() if not str(u).startswith("_")]
 
 # 1. DAY OF WEEK & DATE
 st.title(datetime.now().strftime('%A, %B %d, %Y'))
@@ -576,7 +576,8 @@ if users_data:
             del users_data[to_remove_user]
             save_data('users', users_data)
             if st.session_state.current_user == to_remove_user:
-                st.session_state.current_user = list(users_data.keys())[0] if users_data else None
+                remaining = [u for u in users_data.keys() if not str(u).startswith("_")]
+                st.session_state.current_user = remaining[0] if remaining else None
             st.rerun()
 
 st.sidebar.markdown("---")
@@ -655,14 +656,20 @@ if current_user:
             help="Your chat ID is never displayed publicly."
         )
         chat_id_input = st.text_input(
-            "Chat ID", value=str(current_chat_id) if current_chat_id else "",
-            type="password", key="telegram_chat_id_input"
+            "Chat ID",
+            placeholder="Paste chat ID from /start in Telegram",
+            type="password",
+            key="telegram_chat_id_input",
         )
         if st.button("Save Chat ID", key="save_chat_id_btn"):
-            users_data[current_user]["telegram_chat_id"] = chat_id_input.strip()
-            save_data('users', users_data)
-            st.success("Telegram linked!")
-            st.rerun()
+            new_chat_id = chat_id_input.strip()
+            if not new_chat_id:
+                st.sidebar.error("Enter a Chat ID before saving. Your existing link was not changed.")
+            else:
+                users_data[current_user]["telegram_chat_id"] = new_chat_id
+                save_data('users', users_data)
+                st.success("Telegram linked!")
+                st.rerun()
         if current_chat_id:
             st.caption("✓ Telegram linked")
 

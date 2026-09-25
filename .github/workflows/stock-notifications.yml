@@ -1,0 +1,93 @@
+name: Stock Notifications
+
+on:
+  schedule:
+    # Summary at 9:30 AM Pacific during PDT (16:30 UTC), Mon-Fri
+    - cron: '30 16 * * 1-5'
+    # Price alerts every hour during market hours (13:30–20:30 UTC)
+    - cron: '30 13-20 * * 1-5'
+    # Poll Telegram for /summary and /alerts commands
+    - cron: '*/10 * * * *'
+
+  workflow_dispatch:
+    inputs:
+      job:
+        description: 'Which job to run'
+        required: true
+        default: 'summary'
+        type: choice
+        options:
+          - summary
+          - alerts
+          - poll
+          - all
+
+jobs:
+  summary:
+    runs-on: ubuntu-latest
+    if: >
+      github.event.schedule == '30 16 * * 1-5' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.job == 'summary' || github.event.inputs.job == 'all'))
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install 'requests>=2.31' 'yfinance>=0.2.40'
+
+      - name: Send summary
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          JSONBIN_BIN_ID: ${{ secrets.JSONBIN_BIN_ID }}
+          JSONBIN_KEY: ${{ secrets.JSONBIN_KEY }}
+        run: python notifier.py --summary
+
+  price-alerts:
+    runs-on: ubuntu-latest
+    if: >
+      github.event.schedule == '30 13-20 * * 1-5' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.job == 'alerts' || github.event.inputs.job == 'all'))
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install 'requests>=2.31' 'yfinance>=0.2.40'
+
+      - name: Check price alerts
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          JSONBIN_BIN_ID: ${{ secrets.JSONBIN_BIN_ID }}
+          JSONBIN_KEY: ${{ secrets.JSONBIN_KEY }}
+        run: python notifier.py --alerts
+
+  bot-poll:
+    runs-on: ubuntu-latest
+    if: >
+      github.event.schedule == '*/10 * * * *' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.job == 'poll' || github.event.inputs.job == 'all'))
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install 'requests>=2.31' 'yfinance>=0.2.40'
+
+      - name: Poll Telegram commands
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          JSONBIN_BIN_ID: ${{ secrets.JSONBIN_BIN_ID }}
+          JSONBIN_KEY: ${{ secrets.JSONBIN_KEY }}
+        run: python notifier.py --poll

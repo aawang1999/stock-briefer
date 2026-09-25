@@ -32,7 +32,10 @@ python notifier.py --summary
 # Check tracked stocks and send buy-price alerts
 python notifier.py --alerts
 
-# Run the interactive bot (responds to /summary and /alerts in Telegram)
+# Process pending Telegram commands once (used by GitHub Actions)
+python notifier.py --poll
+
+# Run the interactive bot locally or on Render (optional; do not run with --poll)
 python notifier.py --bot
 ```
 
@@ -44,43 +47,33 @@ python notifier.py --bot
 | `/summary` | Get your stock summary on demand |
 | `/alerts` | Check if any tracked stocks hit your buy price |
 
-## 5. Deployment
+## 5. Deployment (GitHub Actions)
 
-The system has two parts:
-
-### A. Scheduled jobs (GitHub Actions)
-
-Already configured in `.github/workflows/notify.yml`:
+Configured in `.github/workflows/stock-notifications.yml`:
 - **Summary** at 9:30 AM Pacific, Mon–Fri
-- **Price alerts** every 15 min during market hours
+- **Price alerts** every hour during market hours
+- **Bot commands** (`/summary`, `/alerts`) polled every 10 minutes
 
 Secrets needed in GitHub (Settings → Secrets → Actions):
 - `TELEGRAM_BOT_TOKEN`
 - `JSONBIN_BIN_ID`
 - `JSONBIN_KEY`
 
-### B. Interactive bot (Render — free tier)
+### Important: workflow inactivity
 
-The bot needs to run continuously to respond to commands in real-time.
+GitHub **automatically disables** scheduled workflows after ~60 days with no repository activity
+(no commits/PRs). If messages stop arriving:
 
-1. Go to [render.com](https://render.com) and sign up (free)
-2. Click **New** → **Background Worker**
-3. Connect your GitHub repo (`aawang1999/stock-briefer`)
-4. Render will auto-detect `render.yaml` — confirm the settings
-5. Add environment variables: `TELEGRAM_BOT_TOKEN`, `JSONBIN_BIN_ID`, `JSONBIN_KEY`
-6. Deploy
+1. Open https://github.com/aawang1999/stock-briefer/actions
+2. Click **Stock Notifications**
+3. If you see a banner saying the workflow is disabled, click **Enable workflow**
+4. Click **Run workflow** → choose `summary` (or `all`) to verify
 
-Alternatively, run it locally:
-```bash
-export TELEGRAM_BOT_TOKEN="..."
-export JSONBIN_BIN_ID="..."
-export JSONBIN_KEY="..."
-python notifier.py --bot
-```
+Making an occasional commit to the repo (or manually running the workflow) prevents this.
 
 ## Price Alert Behavior
 
-- When a tracked stock reaches or falls below your buy price, an alert is sent immediately
+- When a tracked stock reaches or falls below your buy price, an alert is sent on the next hourly check
 - After sending an alert for a stock, no repeat alert is sent until **24 hours** have passed
 - You can always check manually with `/alerts` in Telegram regardless of cooldown
 

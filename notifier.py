@@ -12,27 +12,41 @@ Environment variables required:
   JSONBIN_KEY         - JSONBin API key (same as Streamlit app)
 """
 
+import html
 import os
 import sys
 import argparse
 import requests
 import yfinance as yf
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 JSONBIN_BIN_ID = os.environ["JSONBIN_BIN_ID"]
 JSONBIN_KEY = os.environ["JSONBIN_KEY"]
 
 INDICES = {'^DJI': 'Dow Jones', '^GSPC': 'S&P 500', '^IXIC': 'NASDAQ'}
+BOT_META_KEY = "_telegram_bot"
+
+
+def _is_user_entry(key, user_data) -> bool:
+    return not str(key).startswith("_") and isinstance(user_data, dict)
+
+
+def escape_html(text: str) -> str:
+    return html.escape(str(text), quote=False)
 
 
 def send_telegram_message(chat_id: str, text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-    resp = requests.post(url, json=payload, timeout=10)
-    if resp.status_code != 200:
-        print(f"  [WARN] Failed to send to {chat_id}: {resp.text}")
-    return resp.status_code == 200
+    for parse_mode in ("HTML", None):
+        payload = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        resp = requests.post(url, json=payload, timeout=30)
+        if resp.status_code == 200:
+            return True
+        print(f"  [WARN] Failed to send to {chat_id} ({parse_mode or 'plain'}): {resp.text}")
+    return False
 
 
 def load_users() -> dict:
@@ -172,7 +186,7 @@ def get_tracked_stock_prices(tracked_stocks: dict) -> list:
 
 
 def build_summary_message(user: str, user_data: dict) -> str:
-    lines = [f"<b>📋 Stock Summary for {user}</b>", ""]
+    lines = [f"<b>📋 Stock Summary for {escape_html(user)}</b>", ""]
 
     indices = get_index_data()
     if indices:
@@ -231,7 +245,10 @@ def _alert_is_within_cooldown(already_alerted: dict, ticker: str) -> bool:
     if not last_alert_iso:
         return False
     try:
-        last_alert_time = datetime.fromisoformat(last_alert_iso)
+        if isinstance(last_alert_iso, str) and len(last_alert_iso) == 10:
+            last_alert_time = datetime.combine(date.fromisoformat(last_alert_iso), datetime.min.time())
+        else:
+            last_alert_time = datetime.fromisoformat(str(last_alert_iso))
         return (datetime.now() - last_alert_time) < timedelta(hours=24)
     except (ValueError, TypeError):
         return False
@@ -240,20 +257,38 @@ def _alert_is_within_cooldown(already_alerted: dict, ticker: str) -> bool:
 def run_summary():
     print("Running summary...")
     users_data = load_users()
+    linked = 0
+    sent = 0
+    failed = 0
 
     for user, user_data in users_data.items():
-        if isinstance(user_data, list):
+        if not _is_user_entry(user, user_data):
             continue
         chat_id = user_data.get("telegram_chat_id", "")
         if not chat_id:
             print(f"  Skipping {user} (no Telegram linked)")
             continue
 
+        linked += 1
         print(f"  Sending to {user}...")
-        message = build_summary_message(user, user_data)
-        send_telegram_message(chat_id, message)
+        try:
+            message = build_summary_message(user, user_data)
+        except Exception as exc:
+            print(f"  [ERROR] Failed to build summary for {user}: {exc}")
+            failed += 1
+            continue
 
-    print("Done.")
+        if len(message) > 4096:
+            message = message[:4090] + "..."
+
+        if send_telegram_message(chat_id, message):
+            sent += 1
+        else:
+            failed += 1
+
+    print(f"Done. linked={linked} sent={sent} failed={failed}")
+    if linked and failed:
+        sys.exit(1)
 
 
 def run_price_alerts():
@@ -262,7 +297,7 @@ def run_price_alerts():
     changed = False
 
     for user, user_data in users_data.items():
-        if isinstance(user_data, list):
+        if not _is_user_entry(user, user_data):
             continue
         chat_id = user_data.get("telegram_chat_id", "")
         if not chat_id:
@@ -312,11 +347,102 @@ def run_price_alerts():
 def _find_user_by_chat_id(users_data: dict, chat_id: str):
     """Find the username associated with a chat_id."""
     for user, user_data in users_data.items():
-        if isinstance(user_data, list):
+        if not _is_user_entry(user, user_data):
             continue
         if str(user_data.get("telegram_chat_id", "")) == str(chat_id):
             return user, user_data
     return None, None
+
+
+def _reply_for_command(chat_id: str, command: str, users_data: dict) -> str:
+    user, user_data = _find_user_by_chat_id(users_data, str(chat_id))
+    if command == "/start":
+        if user:
+            return (
+                f"✅ Connected as {user}.\n\n"
+                "Commands:\n"
+                "/summary — Get your stock summary\n"
+                "/alerts — Check for buy-price alerts"
+            )
+        return (
+            f"Your chat ID is: {chat_id}\n\n"
+            "Enter this in the Stock Briefer app sidebar under Telegram Notifications."
+        )
+
+    if not user:
+        return "⚠️ Account not linked. Send /start for instructions."
+
+    if command == "/summary":
+        return build_summary_message(user, user_data)
+
+    if command == "/alerts":
+        tracked_stocks = user_data.get("tracked_stocks", {})
+        if not tracked_stocks:
+            return "You have no tracked stocks."
+        alerts = get_tracked_stock_prices(tracked_stocks)
+        if not alerts:
+            return "✅ No tracked stocks are at or below your buy price."
+        lines = ["<b>🎯 Buy Price Alerts</b>", ""]
+        for t, current, buy in alerts:
+            lines.append(f"⚡ <b>{escape_html(t)}</b>: ${current:.2f} (buy target: ${buy:.2f})")
+        return "\n".join(lines)
+
+    return "Unknown command. Try /summary or /alerts."
+
+
+def run_poll_commands():
+    """Process pending Telegram commands (for scheduled polling without a long-running bot)."""
+    print("Polling Telegram for commands...")
+    requests.get(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook",
+        params={"drop_pending_updates": False},
+        timeout=10,
+    )
+
+    users_data = load_users()
+    meta = users_data.setdefault(BOT_META_KEY, {})
+    offset = int(meta.get("update_offset", 0))
+
+    resp = requests.get(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
+        params={"offset": offset, "timeout": 0, "allowed_updates": ["message"]},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    updates = resp.json().get("result", [])
+    if not updates:
+        print("No pending commands.")
+        return
+
+    meta_changed = False
+    for upd in updates:
+        meta["update_offset"] = upd["update_id"] + 1
+        meta_changed = True
+        msg = upd.get("message") or {}
+        text = (msg.get("text") or "").strip()
+        if not text.startswith("/"):
+            continue
+        command = text.split()[0].split("@")[0].lower()
+        chat_id = msg.get("chat", {}).get("id")
+        if not chat_id:
+            continue
+
+        print(f"  Command {command} from chat {chat_id}")
+        if command in ("/summary",):
+            send_telegram_message(chat_id, "⏳ Fetching your summary...")
+        elif command == "/alerts":
+            send_telegram_message(chat_id, "⏳ Checking prices...")
+
+        reply = _reply_for_command(str(chat_id), command, users_data)
+        if len(reply) > 4096:
+            reply = reply[:4090] + "..."
+        send_telegram_message(chat_id, reply)
+
+    if meta_changed:
+        users_data[BOT_META_KEY] = meta
+        save_users(users_data)
+
+    print("Done.")
 
 
 def run_bot():
@@ -325,58 +451,24 @@ def run_bot():
     from telegram.ext import Application, CommandHandler, ContextTypes
 
     async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        chat_id = update.effective_chat.id
+        chat_id = str(update.effective_chat.id)
         users_data = load_users()
-        user, _ = _find_user_by_chat_id(users_data, str(chat_id))
-        if user:
-            await update.message.reply_text(
-                f"✅ Connected as {user}.\n\n"
-                "Commands:\n"
-                "/summary — Get your stock summary\n"
-                "/alerts — Check for buy-price alerts"
-            )
-        else:
-            await update.message.reply_text(
-                f"Your chat ID is: <code>{chat_id}</code>\n\n"
-                "Enter this in the Stock Briefer app sidebar under "
-                "Telegram Notifications to link your account.",
-                parse_mode="HTML"
-            )
+        reply = _reply_for_command(chat_id, "/start", users_data)
+        await update.message.reply_text(reply)
 
     async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = str(update.effective_chat.id)
         users_data = load_users()
-        user, user_data = _find_user_by_chat_id(users_data, chat_id)
-        if not user:
-            await update.message.reply_text("⚠️ Account not linked. Send /start for instructions.")
-            return
-
         await update.message.reply_text("⏳ Fetching your summary...")
-        message = build_summary_message(user, user_data)
-        await update.message.reply_text(message, parse_mode="HTML")
+        reply = _reply_for_command(chat_id, "/summary", users_data)
+        await update.message.reply_text(reply, parse_mode="HTML")
 
     async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = str(update.effective_chat.id)
         users_data = load_users()
-        user, user_data = _find_user_by_chat_id(users_data, chat_id)
-        if not user:
-            await update.message.reply_text("⚠️ Account not linked. Send /start for instructions.")
-            return
-
-        tracked_stocks = user_data.get("tracked_stocks", {})
-        if not tracked_stocks:
-            await update.message.reply_text("You have no tracked stocks.")
-            return
-
         await update.message.reply_text("⏳ Checking prices...")
-        alerts = get_tracked_stock_prices(tracked_stocks)
-        if not alerts:
-            await update.message.reply_text("✅ No tracked stocks are at or below your buy price.")
-        else:
-            lines = ["<b>🎯 Buy Price Alerts</b>", ""]
-            for t, current, buy in alerts:
-                lines.append(f"⚡ <b>{t}</b>: ${current:.2f} (buy target: ${buy:.2f})")
-            await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        reply = _reply_for_command(chat_id, "/alerts", users_data)
+        await update.message.reply_text(reply, parse_mode="HTML")
 
     async def post_init(application: Application):
         await application.bot.set_my_commands([
@@ -398,10 +490,11 @@ if __name__ == "__main__":
     parser.add_argument("--summary", action="store_true", help="Send summary to all linked users")
     parser.add_argument("--alerts", action="store_true", help="Check and send buy-price alerts")
     parser.add_argument("--bot", action="store_true", help="Run interactive Telegram bot")
+    parser.add_argument("--poll", action="store_true", help="Process pending Telegram commands once")
     args = parser.parse_args()
 
-    if not args.summary and not args.alerts and not args.bot:
-        print("Usage: python notifier.py --summary | --alerts | --bot")
+    if not args.summary and not args.alerts and not args.bot and not args.poll:
+        print("Usage: python notifier.py --summary | --alerts | --poll | --bot")
         sys.exit(1)
 
     if args.bot:
@@ -410,3 +503,5 @@ if __name__ == "__main__":
         run_summary()
     if args.alerts:
         run_price_alerts()
+    if args.poll:
+        run_poll_commands()

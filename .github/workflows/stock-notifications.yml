@@ -4,7 +4,7 @@ on:
   schedule:
     # Summary at 9:30 AM Pacific during PDT (16:30 UTC), Mon-Fri
     - cron: '30 16 * * 1-5'
-    # Price alerts every hour during market hours (13:30–20:30 UTC)
+    # Price and RSI alerts every hour during market hours (13:30–20:30 UTC)
     - cron: '30 13-20 * * 1-5'
     # Poll Telegram for /summary and /alerts commands
     - cron: '*/10 * * * *'
@@ -68,6 +68,14 @@ jobs:
           JSONBIN_BIN_ID: ${{ secrets.JSONBIN_BIN_ID }}
           JSONBIN_KEY: ${{ secrets.JSONBIN_KEY }}
         run: python notifier.py --alerts
+
+      - name: Check RSI alerts
+        if: ${{ !cancelled() }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          JSONBIN_BIN_ID: ${{ secrets.JSONBIN_BIN_ID }}
+          JSONBIN_KEY: ${{ secrets.JSONBIN_KEY }}
+        run: python notifier.py --rsi-alerts
 
   bot-poll:
     runs-on: ubuntu-latest

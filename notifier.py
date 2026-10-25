@@ -4,6 +4,8 @@ Stock Briefer Telegram Notifier
 Modes:
   python notifier.py --summary     Send summary to all linked users
   python notifier.py --alerts      Check tracked stocks and send buy-price alerts
+  python notifier.py --rsi-alerts  Check portfolio stocks and send RSI (10d) >= 90 alerts
+  python notifier.py --poll        Process pending Telegram commands once
   python notifier.py --bot         Run interactive Telegram bot (responds to /summary, /alerts)
 
 Environment variables required:
@@ -17,6 +19,7 @@ import os
 import sys
 import argparse
 import requests
+import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta, date
 
@@ -26,6 +29,7 @@ JSONBIN_KEY = os.environ["JSONBIN_KEY"]
 
 INDICES = {'^DJI': 'Dow Jones', '^GSPC': 'S&P 500', '^IXIC': 'NASDAQ'}
 BOT_META_KEY = "_telegram_bot"
+RSI_ALERT_THRESHOLD = 90
 
 
 def _is_user_entry(key, user_data) -> bool:
@@ -185,6 +189,56 @@ def get_tracked_stock_prices(tracked_stocks: dict) -> list:
     return alerts
 
 
+def compute_rsi_series(price_series, period):
+    """Wilder's RSI (0-100) for each day in the series. Must match compute_rsi_series in app.py."""
+    closes = price_series.dropna()
+    delta = closes.diff()
+    avg_gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    avg_loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    rsi = 100 - 100 / (1 + avg_gain / avg_loss)
+    rsi = rsi.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    rsi = rsi.mask((avg_loss == 0) & (avg_gain == 0), 50.0)
+    return rsi
+
+
+def get_high_rsi_stocks(tickers: list) -> dict:
+    """Returns {ticker: (latest RSI (10d), consecutive trading days at or above the threshold)}
+    for tickers whose latest RSI (10d) is at or above RSI_ALERT_THRESHOLD."""
+    if not tickers:
+        return {}
+    try:
+        df = yf.download(" ".join(tickers), period="1y", progress=False)
+    except Exception:
+        return {}
+    if df.empty:
+        return {}
+
+    closes = df["Close"]
+    results = {}
+    for ticker in tickers:
+        try:
+            if isinstance(closes, pd.Series):
+                series = closes
+            elif ticker in closes.columns:
+                series = closes[ticker]
+            else:
+                continue
+
+            rsi_10 = compute_rsi_series(series, 10).dropna()
+            if rsi_10.empty or rsi_10.iloc[-1] < RSI_ALERT_THRESHOLD:
+                continue
+
+            days = 0
+            for value in reversed(rsi_10.tolist()):
+                if value < RSI_ALERT_THRESHOLD:
+                    break
+                days += 1
+            results[ticker] = (float(rsi_10.iloc[-1]), days)
+        except Exception:
+            continue
+    return results
+
+
 def build_summary_message(user: str, user_data: dict) -> str:
     lines = [f"<b>📋 Stock Summary for {escape_html(user)}</b>", ""]
 
@@ -342,6 +396,59 @@ def run_price_alerts():
     print("Done.")
 
 
+def run_rsi_alerts():
+    print("Checking RSI (10d) alerts...")
+    users_data = load_users()
+
+    linked_users = {
+        user: user_data for user, user_data in users_data.items()
+        if _is_user_entry(user, user_data) and user_data.get("telegram_chat_id") and user_data.get("stocks")
+    }
+    all_tickers = sorted({t for user_data in linked_users.values() for t in user_data["stocks"]})
+    high_rsi = get_high_rsi_stocks(all_tickers)
+
+    updated_cooldowns = {}
+    for user, user_data in linked_users.items():
+        portfolio = user_data["stocks"]
+        already_alerted = dict(user_data.get("_rsi_alerted_stocks", {}))
+        original = dict(already_alerted)
+
+        for ticker in portfolio:
+            if ticker not in high_rsi or _alert_is_within_cooldown(already_alerted, ticker):
+                continue
+            rsi, days = high_rsi[ticker]
+            day_word = "day" if days == 1 else "days"
+            message = (
+                f"<b>🔥 RSI Alert: {escape_html(ticker)}</b>\n\n"
+                f"RSI (10d): <b>{rsi:.1f}</b>\n"
+                f"At or above {RSI_ALERT_THRESHOLD} for <b>{days}</b> consecutive trading {day_word}"
+            )
+            if send_telegram_message(user_data["telegram_chat_id"], message):
+                print(f"  RSI alert sent to {user} for {ticker} (RSI {rsi:.1f}, {days} {day_word})")
+                already_alerted[ticker] = datetime.now().isoformat()
+
+        for t in list(already_alerted):
+            if t not in portfolio:
+                del already_alerted[t]
+
+        if already_alerted != original:
+            updated_cooldowns[user] = already_alerted
+
+    if updated_cooldowns:
+        # Re-read right before writing so concurrent jobs' changes to other keys aren't overwritten.
+        fresh = load_users()
+        for user, cooldowns in updated_cooldowns.items():
+            if not _is_user_entry(user, fresh.get(user)):
+                continue
+            if cooldowns:
+                fresh[user]["_rsi_alerted_stocks"] = cooldowns
+            else:
+                fresh[user].pop("_rsi_alerted_stocks", None)
+        save_users(fresh)
+
+    print("Done.")
+
+
 # --- Interactive Telegram Bot ---
 
 def _find_user_by_chat_id(users_data: dict, chat_id: str):
@@ -489,12 +596,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stock Briefer Telegram Notifier")
     parser.add_argument("--summary", action="store_true", help="Send summary to all linked users")
     parser.add_argument("--alerts", action="store_true", help="Check and send buy-price alerts")
+    parser.add_argument("--rsi-alerts", action="store_true", help="Check and send RSI (10d) >= 90 alerts")
     parser.add_argument("--bot", action="store_true", help="Run interactive Telegram bot")
     parser.add_argument("--poll", action="store_true", help="Process pending Telegram commands once")
     args = parser.parse_args()
 
-    if not args.summary and not args.alerts and not args.bot and not args.poll:
-        print("Usage: python notifier.py --summary | --alerts | --poll | --bot")
+    if not (args.summary or args.alerts or args.rsi_alerts or args.bot or args.poll):
+        print("Usage: python notifier.py --summary | --alerts | --rsi-alerts | --poll | --bot")
         sys.exit(1)
 
     if args.bot:
@@ -503,5 +611,7 @@ if __name__ == "__main__":
         run_summary()
     if args.alerts:
         run_price_alerts()
+    if args.rsi_alerts:
+        run_rsi_alerts()
     if args.poll:
         run_poll_commands()

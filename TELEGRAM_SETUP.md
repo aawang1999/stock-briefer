@@ -32,6 +32,9 @@ python notifier.py --summary
 # Check tracked stocks and send buy-price alerts
 python notifier.py --alerts
 
+# Check portfolio stocks and send RSI (10d) >= 90 alerts
+python notifier.py --rsi-alerts
+
 # Process pending Telegram commands once (used by GitHub Actions)
 python notifier.py --poll
 
@@ -51,7 +54,7 @@ python notifier.py --bot
 
 Configured in `.github/workflows/stock-notifications.yml`:
 - **Summary** at 9:30 AM Pacific, Mon–Fri
-- **Price alerts** every hour during market hours
+- **Price alerts** and **RSI alerts** every hour during market hours
 - **Bot commands** (`/summary`, `/alerts`) polled every 10 minutes
 
 Secrets needed in GitHub (Settings → Secrets → Actions):
@@ -76,6 +79,13 @@ Making an occasional commit to the repo (or manually running the workflow) preve
 - When a tracked stock reaches or falls below your buy price, an alert is sent on the next hourly check
 - After sending an alert for a stock, no repeat alert is sent until **24 hours** have passed
 - You can always check manually with `/alerts` in Telegram regardless of cooldown
+
+## RSI Alert Behavior
+
+- When a portfolio stock's RSI (10d) meets or exceeds **90**, an alert is sent on the next hourly check
+- The message includes the ticker, that day's RSI (10d), and how many consecutive trading days it has stayed at or above 90
+- After sending an RSI alert for a stock, no repeat RSI alert is sent until **24 hours** have passed
+- RSI alerts have their own cooldown, separate from price alerts
 
 ## Security Notes
 

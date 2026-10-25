@@ -197,18 +197,13 @@ def rsi_bg(val):
         return f'background-color:{COLORS["bad_bg"]};color:black;'
     return ''
 
-def render_signal_badge(period, color):
-    bg = COLORS['text_good'] if color == 'green' else COLORS['text_bad']
-    return (
-        f'<span style="display:inline-block;background:{bg};color:white;border-radius:999px;'
-        f'padding:4px 8px;font-size:10px;font-weight:600;margin:2px;min-width:32px;text-align:center;">'
-        f'{period}</span>'
-    )
+def days_at_90_bg(val):
+    if pd.notna(val) and val > 1:
+        return f'background-color:{COLORS["bad_bg"]};color:black;'
+    return ''
 
-def render_signals_cell(signals):
-    if not signals:
-        return ''
-    return ''.join(render_signal_badge(s['period'], s['color']) for s in signals)
+def format_signals(signals):
+    return ' '.join(f"{'🟢' if s['color'] == 'green' else '🔴'} {s['period']}" for s in signals)
 
 def pct_change_bg(val):
     if not isinstance(val, (int, float)) or pd.isna(val):
@@ -218,48 +213,6 @@ def pct_change_bg(val):
     if val < 0:
         return f'background-color:{COLORS["bad_bg"]};color:black;'
     return ''
-
-def render_indicators_table(df):
-    header = (
-        '<table style="width:100%;border-collapse:collapse;font-size:14px;">'
-        '<thead><tr style="border-bottom:1px solid rgba(250,250,250,0.2);">'
-        '<th style="text-align:left;padding:8px 12px;">Ticker</th>'
-        '<th style="text-align:left;padding:8px 12px;">Price</th>'
-        '<th style="text-align:left;padding:8px 12px;">% Change</th>'
-        '<th style="text-align:left;padding:8px 12px;">% Change (5d)</th>'
-        '<th style="text-align:left;padding:8px 12px;">Tunnels</th>'
-        '<th style="text-align:left;padding:8px 12px;">SMAs</th>'
-        '<th style="text-align:left;padding:8px 12px;">RSI (5d)</th>'
-        '<th style="text-align:left;padding:8px 12px;">RSI (10d)</th>'
-        '<th style="text-align:left;padding:8px 12px;">Days at 90+ RSI (10d)</th>'
-        '</tr></thead><tbody>'
-    )
-    rows = []
-    for _, row in df.iterrows():
-        chg_bg = pct_change_bg(row['% Change'])
-        chg5_bg = pct_change_bg(row['% Change (5d)'])
-        price = row['Price']
-        price_str = f'${price:,.2f}' if pd.notna(price) else 'N/A'
-        chg_str = f"{row['% Change']:+.2f}%" if pd.notna(row['% Change']) else 'N/A'
-        chg5_str = f"{row['% Change (5d)']:+.2f}%" if pd.notna(row['% Change (5d)']) else 'N/A'
-        rsi5, rsi10, days_90 = row['RSI (5d)'], row['RSI (10d)'], row['Days at 90+ RSI (10d)']
-        rsi5_str = f'{rsi5:.1f}' if pd.notna(rsi5) else 'N/A'
-        rsi10_str = f'{rsi10:.1f}' if pd.notna(rsi10) else 'N/A'
-        days_90_bg = f'background-color:{COLORS["bad_bg"]};color:black;' if days_90 > 1 else ''
-        rows.append(
-            f'<tr style="border-bottom:1px solid rgba(250,250,250,0.08);">'
-            f'<td style="padding:8px 12px;font-weight:600;">{row["Ticker"]}</td>'
-            f'<td style="padding:8px 12px;">{price_str}</td>'
-            f'<td style="padding:8px 12px;{chg_bg}">{chg_str}</td>'
-            f'<td style="padding:8px 12px;{chg5_bg}">{chg5_str}</td>'
-            f'<td style="padding:8px 12px;">{render_signals_cell(row["tunnel_signals"])}</td>'
-            f'<td style="padding:8px 12px;">{render_signals_cell(row["sma_signals"])}</td>'
-            f'<td style="padding:8px 12px;{rsi_bg(rsi5)}">{rsi5_str}</td>'
-            f'<td style="padding:8px 12px;{rsi_bg(rsi10)}">{rsi10_str}</td>'
-            f'<td style="padding:8px 12px;{days_90_bg}">{int(days_90)}</td>'
-            f'</tr>'
-        )
-    return header + ''.join(rows) + '</tbody></table>'
 
 # --- PERSISTENCE FUNCTIONS ---
 def load_data(key, default_data=None):
@@ -839,7 +792,27 @@ if current_user:
                     )
                 elif st.session_state.portfolio_view_idx == 1:
                     # --- TUNNELS & SMAs TABLE VIEW ---
-                    st.markdown(render_indicators_table(stock_df), unsafe_allow_html=True)
+                    indicators_df = stock_df.assign(
+                        Tunnels=stock_df['tunnel_signals'].map(format_signals),
+                        SMAs=stock_df['sma_signals'].map(format_signals),
+                    )
+                    st.dataframe(
+                        indicators_df.style
+                        .map(pct_change_bg, subset=['% Change', '% Change (5d)'])
+                        .map(rsi_bg, subset=['RSI (5d)', 'RSI (10d)'])
+                        .map(days_at_90_bg, subset=['Days at 90+ RSI (10d)'])
+                        .format({
+                            "Price": lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A",
+                            "% Change": lambda x: f"{x:+.2f}%" if pd.notna(x) else "N/A",
+                            "% Change (5d)": lambda x: f"{x:+.2f}%" if pd.notna(x) else "N/A",
+                            "RSI (5d)": lambda x: f"{x:.1f}" if pd.notna(x) else "N/A",
+                            "RSI (10d)": lambda x: f"{x:.1f}" if pd.notna(x) else "N/A",
+                            "Days at 90+ RSI (10d)": lambda x: f"{int(x)}" if pd.notna(x) else "0",
+                        }),
+                        column_order=("Ticker", "Price", "% Change", "% Change (5d)", "Tunnels", "SMAs", "RSI (5d)", "RSI (10d)", "Days at 90+ RSI (10d)"),
+                        hide_index=True,
+                        width="stretch"
+                    )
                 else:
                     # --- HEAT MAP VIEW ---
                     hm_data = []

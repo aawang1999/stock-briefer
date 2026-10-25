@@ -167,6 +167,36 @@ def compute_sma_signals(price_series, current_price):
             signals.append({'period': label, 'color': 'red'})
     return signals
 
+def compute_rsi_series(price_series, period):
+    """Wilder's RSI (0-100) for each day in the series."""
+    closes = price_series.dropna()
+    delta = closes.diff()
+    avg_gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    avg_loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    rsi = 100 - 100 / (1 + avg_gain / avg_loss)
+    rsi = rsi.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    rsi = rsi.mask((avg_loss == 0) & (avg_gain == 0), 50.0)
+    return rsi
+
+def compute_rsi_metrics(price_series):
+    rsi_5 = compute_rsi_series(price_series, 5)
+    rsi_10 = compute_rsi_series(price_series, 10).dropna()
+    latest_rsi_5 = rsi_5.iloc[-1] if not rsi_5.empty else np.nan
+    latest_rsi_10 = rsi_10.iloc[-1] if not rsi_10.empty else np.nan
+
+    days_at_90 = 0
+    for value in reversed(rsi_10.tolist()):
+        if value < 90:
+            break
+        days_at_90 += 1
+
+    return latest_rsi_5, latest_rsi_10, days_at_90
+
+def rsi_bg(val):
+    if isinstance(val, (int, float)) and pd.notna(val) and val > 90:
+        return f'background-color:{COLORS["bad_bg"]};color:black;'
+    return ''
+
 def render_signal_badge(period, color):
     bg = COLORS['text_good'] if color == 'green' else COLORS['text_bad']
     return (
@@ -199,6 +229,9 @@ def render_indicators_table(df):
         '<th style="text-align:left;padding:8px 12px;">% Change (5d)</th>'
         '<th style="text-align:left;padding:8px 12px;">Tunnels</th>'
         '<th style="text-align:left;padding:8px 12px;">SMAs</th>'
+        '<th style="text-align:left;padding:8px 12px;">RSI (5d)</th>'
+        '<th style="text-align:left;padding:8px 12px;">RSI (10d)</th>'
+        '<th style="text-align:left;padding:8px 12px;">Days at 90+ RSI (10d)</th>'
         '</tr></thead><tbody>'
     )
     rows = []
@@ -209,6 +242,10 @@ def render_indicators_table(df):
         price_str = f'${price:,.2f}' if pd.notna(price) else 'N/A'
         chg_str = f"{row['% Change']:+.2f}%" if pd.notna(row['% Change']) else 'N/A'
         chg5_str = f"{row['% Change (5d)']:+.2f}%" if pd.notna(row['% Change (5d)']) else 'N/A'
+        rsi5, rsi10, days_90 = row['RSI (5d)'], row['RSI (10d)'], row['Days at 90+ RSI (10d)']
+        rsi5_str = f'{rsi5:.1f}' if pd.notna(rsi5) else 'N/A'
+        rsi10_str = f'{rsi10:.1f}' if pd.notna(rsi10) else 'N/A'
+        days_90_bg = f'background-color:{COLORS["bad_bg"]};color:black;' if days_90 > 1 else ''
         rows.append(
             f'<tr style="border-bottom:1px solid rgba(250,250,250,0.08);">'
             f'<td style="padding:8px 12px;font-weight:600;">{row["Ticker"]}</td>'
@@ -217,6 +254,9 @@ def render_indicators_table(df):
             f'<td style="padding:8px 12px;{chg5_bg}">{chg5_str}</td>'
             f'<td style="padding:8px 12px;">{render_signals_cell(row["tunnel_signals"])}</td>'
             f'<td style="padding:8px 12px;">{render_signals_cell(row["sma_signals"])}</td>'
+            f'<td style="padding:8px 12px;{rsi_bg(rsi5)}">{rsi5_str}</td>'
+            f'<td style="padding:8px 12px;{rsi_bg(rsi10)}">{rsi10_str}</td>'
+            f'<td style="padding:8px 12px;{days_90_bg}">{int(days_90)}</td>'
             f'</tr>'
         )
     return header + ''.join(rows) + '</tbody></table>'
@@ -359,6 +399,7 @@ def get_market_data(tickers):
             pc_ratio = get_put_call_ratio(ticker)
             tunnel_signals = compute_tunnel_signals(high_series, low_series, price_series)
             sma_signals = compute_sma_signals(price_series, current_price)
+            rsi_5, rsi_10, days_at_90 = compute_rsi_metrics(price_series)
 
             data.append({
                 "Ticker": ticker,
@@ -371,6 +412,9 @@ def get_market_data(tickers):
                 "Next Div": div_days,
                 "tunnel_signals": tunnel_signals,
                 "sma_signals": sma_signals,
+                "RSI (5d)": rsi_5,
+                "RSI (10d)": rsi_10,
+                "Days at 90+ RSI (10d)": days_at_90,
             })
         except Exception: continue
 
